@@ -1,790 +1,571 @@
 # Interface Types
 
-Uranite interfaces are abstract contracts that define method signatures without implementations. Classes implement interfaces via the `implements` keyword, and the compiler validates that every required method is present with a compatible signature. At the LLVM level, interface-typed variables are opaque pointers — dispatch happens through interface tables (itables), which are constant arrays of function pointers generated per class-interface pair. Interfaces support multiple inheritance via `extends`, generic parameters, property methods, and nested type declarations. A fixed-point method propagation algorithm ensures inherited methods from super-interfaces are available to all descendants, and a stable `methodOrder` vector determines itable slot assignment for correct cross-module dispatch.
-
-This document covers the complete interface type specification — the `InterfaceType` struct with `methodOrder` and `superInterfaces`, interface declaration syntax with `extends` and forward declarations, parsing implementation, three-phase semantic registration (method pre-registration, super-interface resolution, method propagation with circular detection, method order stabilization), interface validation against implementing classes, HIR lowering to `HIRInterfaceDefinition`, codegen with itable generation (`_MIR_itable_ClassName_InterfaceName` globals), interface dispatch via vtable slot lookup, abstract class dispatch with vtable identity comparison, the `implementsInterface()` and `extendsInterface()` recursive checks, builtin operator interfaces, and practical usage patterns.
-
 ---
 
 ## Table of Contents
 
-- [Type Identity](#type-identity)
-- [The InterfaceType Struct](#the-interfacetype-struct)
-  - [Method Lookup](#method-lookup)
-  - [Super-Interface Check](#super-interface-check)
-- [Interface Declaration Syntax](#interface-declaration-syntax)
-  - [Basic Interface](#basic-interface)
+- [Interface Types](#interface-types)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+  - [Defining an Interface](#defining-an-interface)
+  - [Implementing an Interface](#implementing-an-interface)
+  - [Multiple Method Contracts](#multiple-method-contracts)
+  - [Multiple Interfaces](#multiple-interfaces)
   - [Interface Inheritance](#interface-inheritance)
   - [Generic Interfaces](#generic-interfaces)
-  - [Property Methods](#property-methods)
-  - [Forward Declarations](#forward-declarations)
-  - [Nested Declarations](#nested-declarations)
-- [AST Representation](#ast-representation)
-- [Parsing Implementation](#parsing-implementation)
-  - [Interface Header Parsing](#interface-header-parsing)
-  - [Interface Body Parsing](#interface-body-parsing)
-- [Semantic Analysis](#semantic-analysis)
-  - [Phase 1 — Method Pre-Registration](#phase-1--method-pre-registration)
-  - [Phase 2 — Super-Interface Resolution](#phase-2--super-interface-resolution)
-  - [Phase 3 — Method Propagation](#phase-3--method-propagation)
-  - [Phase 4 — Method Order Stabilization](#phase-4--method-order-stabilization)
-  - [Full Interface Analysis](#full-interface-analysis)
-  - [Interface Validation](#interface-validation)
-- [Implementation Checking](#implementation-checking)
-  - [implementsInterface](#implementsinterface)
-  - [extendsInterface](#extendsinterface)
-- [Compilation Pipeline](#compilation-pipeline)
-  - [HIR Stage](#hir-stage)
-  - [Codegen Stage — Interface Table Generation](#codegen-stage--interface-table-generation)
-  - [Codegen Stage — Interface Dispatch](#codegen-stage--interface-dispatch)
-  - [Codegen Stage — Abstract Class Dispatch](#codegen-stage--abstract-class-dispatch)
-  - [Codegen Stage — toLLVMType](#codegen-stage--tollvmtype)
-- [Builtin Operator Interfaces](#builtin-operator-interfaces)
-- [Assignability Rules](#assignability-rules)
-- [Examples](#examples)
-  - [Basic Interface Implementation](#basic-interface-implementation)
-  - [Multiple Interfaces](#multiple-interfaces)
-  - [Interface Dispatch](#interface-dispatch)
+  - [Polymorphic Dispatch](#polymorphic-dispatch)
+  - [Interface-Typed Parameters](#interface-typed-parameters)
+  - [Method Reference](#method-reference)
+    - [Declaration Syntax](#declaration-syntax)
+    - [Implementation Rules](#implementation-rules)
+  - [Examples](#examples)
+    - [Shape Hierarchy](#shape-hierarchy)
+    - [Validator Pattern](#validator-pattern)
+    - [Temperature Converter](#temperature-converter)
+    - [Describable Items](#describable-items)
 
 ---
 
-## Type Identity
+## Overview
 
-| Property | Value |
-|---|---|
-| Type Kind | `Type::Kind::Interface` |
-| LLVM Type | `PointerType::getUnqual` (opaque pointer) |
-| Dispatch Mechanism | Interface table (itable) with function pointer array |
-| Itable Naming | `_MIR_itable_ClassName_InterfaceName` |
-| All Methods | Implicitly `isVirtual = true` |
-| Method Slot Order | Determined by `methodOrder` vector |
+Interfaces define contracts that classes must fulfill. An interface declares method signatures without providing implementations. Classes adopt interfaces using the `implements` keyword and must provide concrete implementations for every declared method.
 
-Interfaces have no runtime representation of their own — they are purely a type-system concept. Variables typed as an interface hold opaque pointers to concrete class instances. Dispatch to the correct method implementation happens via the itable stored in the object's vtable slot.
+Interfaces enable polymorphism — a function that accepts an interface-typed parameter can work with any class that implements that interface, dispatching to the correct method implementation at runtime.
+
+Interfaces support inheritance via `extends`, generic type parameters, and multiple interface implementation on a single class.
 
 ---
 
-## The InterfaceType Struct
+## Defining an Interface
 
-Defined in `src/uranite/semantic/typeref.hpp:835-896`:
-
-```
-struct InterfaceType : Type
-    astDeclaration      : InterfaceDeclaration* (default nullptr)
-    genericParameters   : std::vector<TypeSharedPointer>
-    methods             : std::vector<MethodInfo>
-    methodsPopulating   : bool (default false)
-    inheritanceResolved : bool (default false)
-    methodOrder         : std::vector<std::string>
-    superInterfaces     : std::vector<TypeSharedPointer>
-    typeSubstitutions   : std::unordered_map<std::string, TypeSharedPointer>
-```
-
-| Field | Description |
-|---|---|
-| `astDeclaration` | Back-pointer to AST for codegen and monomorphization |
-| `genericParameters` | Generic type parameters |
-| `methods` | All methods including those inherited from super-interfaces |
-| `methodsPopulating` | Guard flag to prevent circular recursion during population |
-| `inheritanceResolved` | Flag indicating super-interface methods have been propagated |
-| `methodOrder` | Stable ordered list of method names — determines itable slot indices |
-| `superInterfaces` | List of interfaces this interface extends |
-| `typeSubstitutions` | Generic parameter concrete type bindings |
-
-Constructor sets `Kind::Interface`:
-
-```
-InterfaceType(name) → Type(Type::Kind::Interface, name)
-```
-
-The `methodOrder` vector is critical for codegen. When a class implements an interface, the itable entries are ordered exactly as `methodOrder` specifies. All classes implementing the same interface share the same slot assignment, enabling correct polymorphic dispatch.
-
-### Method Lookup
-
-`findMethod(name)` at `typeref.hpp:872-879`:
-
-```
-MethodInfo* findMethod(name):
-    for method in methods:
-        if method.name == name: return &method
-    return nullptr
-```
-
-### Super-Interface Check
-
-`extendsInterface(qualifiedName)` at `typeref.hpp:881-894` recursively checks inheritance:
-
-```
-extendsInterface(qualifiedName):
-    for superIface in superInterfaces:
-        if superIface.qualified == qualifiedName or
-           qualname::startsWith(superIface.qualified, qualifiedName):
-            return true
-        if superIface.kind == Interface:
-            if superIface.extendsInterface(qualifiedName):
-                return true
-    return false
-```
-
-This enables transitive interface checks — if `C extends B extends A`, then `C.extendsInterface("A")` returns true.
-
----
-
-## Interface Declaration Syntax
-
-### Basic Interface
-
-Interfaces declare method signatures without bodies:
+An interface is declared with the `interface` keyword. Method signatures end with a semicolon instead of a body.
 
 ```uranite
-interface Describable:
-    public function describe( self ) -> Void
+public interface Greetable:
+
+    public function greet( self ) -> String;
 ```
 
-Methods in interfaces are bodyless — the declaration ends with the return type annotation, no colon or indented body. All interface methods are implicitly virtual.
-
-Methods that have bodies (default implementations) are also supported — the parser delegates to the standard `parseFunctionDeclaration`, which handles both bodyless and bodied methods.
-
-### Interface Inheritance
-
-Interfaces extend other interfaces with `extends` (or `implements` — both accepted):
-
-```uranite
-interface Serializable extends Stringable:
-    public function serialize( self ) -> String
-
-interface ReadWritable extends Readable, Writable:
-    public function readWrite( self ) -> Void
-```
-
-Super-interface methods are inherited — a class implementing `ReadWritable` must implement methods from `Readable`, `Writable`, and `ReadWritable` itself.
-
-### Generic Interfaces
-
-Interfaces support generic type parameters:
-
-```uranite
-interface Iterable<E>:
-    public function iterator( self ) -> Iterator<E>
-
-interface Comparable<T>:
-    public function compareTo( self, T other ) -> I32
-```
-
-### Property Methods
-
-Property methods use the `property` keyword:
-
-```uranite
-interface Measurable:
-    public property size( self ) -> I64
-```
-
-Property methods set `isProperty = true` on `MethodInfo`, allowing field-syntax access at the call site.
-
-### Forward Declarations
-
-Interfaces can be forward-declared:
-
-```uranite
-interface Serializable;
-```
-
-Forward declarations create the `InterfaceType` in the registry without populating methods.
-
-### Nested Declarations
-
-Interface bodies can contain nested type declarations:
-
-```uranite
-interface Container<E>:
-    public function size( self ) -> I64
-
-    public class Entry:
-        public E value
-```
-
-Nested classes, interfaces, structs, and enums are parsed recursively and stored in `nestedDeclarations`.
+Each method in an interface takes `self` as its first parameter, just like class instance methods. The semicolon after the method signature indicates there is no body — implementing classes provide the body.
 
 ---
 
-## AST Representation
+## Implementing an Interface
 
-Defined in `src/uranite/ast/node.hpp:2629-2663`:
-
-```
-struct InterfaceDeclaration : Declaration
-    genericParameters   : std::vector<GenericParameterSharedPointer>
-    isFinal             : bool (default false)
-    methods             : std::vector<DeclarationSharedPointer>
-    name                : std::string
-    nestedDeclarations  : std::vector<DeclarationSharedPointer>
-    superInterfaces     : std::vector<TypeNodeSharedPointer>
-```
-
-| Field | Description |
-|---|---|
-| `genericParameters` | Generic type parameters for the interface |
-| `isFinal` | Prevents further extension |
-| `methods` | Abstract or default method declarations |
-| `name` | Interface identifier |
-| `nestedDeclarations` | Nested classes, interfaces, structs, enums |
-| `superInterfaces` | Parent interfaces via `extends` |
-
----
-
-## Parsing Implementation
-
-### Interface Header Parsing
-
-The parser at `parser.cpp:1732-1758` handles interface headers:
-
-```
-parseInterfaceDeclaration(access):
-    expect(KeywordInterface)
-    name = expect(Identifier)
-    declaration.access = access
-    declaration.genericParameters = parseGenericParameters()
-
-    if match(Semicolon):
-        return declaration    // forward declaration
-
-    if check(KeywordExtends) or check(KeywordImplements):
-        advance()
-        declaration.superInterfaces.push_back(parseTypeNode())
-        while match(Comma):
-            declaration.superInterfaces.push_back(parseTypeNode())
-
-    if match(Colon):
-        if not newline or eof:
-            // inline super-interface after colon (edge case)
-            declaration.superInterfaces.push_back(parseTypeNode())
-            while match(Comma):
-                declaration.superInterfaces.push_back(parseTypeNode())
-            expect(Colon)    // second colon for body
-    expectNewline()
-```
-
-Both `extends` and `implements` keywords are accepted for super-interfaces. The parser handles an edge case where super-interfaces can appear after the first colon, requiring a second colon for the body.
-
-### Interface Body Parsing
-
-At `parser.cpp:1760-1798`:
-
-```
-if match(Indent):
-    while not Dedent or Eof:
-        methodAccess = parseAccessModifier()
-
-        if KeywordClass:
-            nestedDeclarations.push_back(parseClassDeclaration(methodAccess))
-        elif KeywordInterface:
-            nestedDeclarations.push_back(parseInterfaceDeclaration(methodAccess))
-        elif KeywordStruct:
-            nestedDeclarations.push_back(parseStructDeclaration(methodAccess))
-        elif KeywordEnum:
-            nestedDeclarations.push_back(parseEnumDeclaration(methodAccess))
-        else:
-            isProperty = check(KeywordProperty)
-            method = parseFunctionDeclaration(methodAccess, false, false, false, false)
-            if isProperty: method.isProperty = true
-            declaration.methods.push_back(method)
-    match(Dedent)
-```
-
-Interface methods are parsed with all modifier flags set to `false` (no virtual, override, abstract, or static) — the semantic analyzer sets `isVirtual = true` on all interface methods.
-
----
-
-## Semantic Analysis
-
-Interface analysis spans four phases during module registration, plus a full analysis pass.
-
-### Phase 1 — Method Pre-Registration
-
-At `analyzer.cpp:280-327`, interface methods are eagerly registered during the first pass of `analyzeModuleRegistration()`:
-
-```
-for declaration in program.declarations where InterfaceDeclaration:
-    interfaceType = lookupType(declaration.name)
-    if methods already populated: skip
-
-    register generic parameters as GenericParameterType
-
-    for method in declaration.methods where FunctionDeclaration:
-        resolve parameter types (skip self)
-        resolve return type (default Void)
-        create FunctionType
-
-        methodInfo.access = method.access
-        methodInfo.isFinal = false
-        methodInfo.isOverride = false
-        methodInfo.isVirtual = true
-        methodInfo.isStatic = method.isStatic
-        methodInfo.isProperty = method.isProperty
-        methodInfo.virtualTableIndex = -1
-        interfaceType.methods.push_back(methodInfo)
-```
-
-All interface methods are marked `isVirtual = true` and `isFinal = false` regardless of source declaration.
-
-### Phase 2 — Super-Interface Resolution
-
-At `analyzer.cpp:329-346`, super-interfaces are resolved:
-
-```
-for declaration in program.declarations where InterfaceDeclaration:
-    interfaceType = lookupType(declaration.name)
-    pushScope(Class)
-    for superInterfaceNode in declaration.superInterfaces:
-        resolvedSuperInterface = resolveType(superInterfaceNode)
-        if resolvedSuperInterface.kind == Interface:
-            interfaceType.superInterfaces.push_back(resolvedSuperInterface)
-    popScope()
-```
-
-### Phase 3 — Method Propagation
-
-At `analyzer.cpp:347-385`, a fixed-point iteration propagates methods from super-interfaces to child interfaces:
-
-```
-hasChanges = true
-iteration = 0
-while hasChanges and iteration < 1000:
-    hasChanges = false
-    for declaration in program.declarations where InterfaceDeclaration:
-        interfaceType = lookupType(declaration.name)
-        for superInterface in interfaceType.superInterfaces:
-            for superMethod in superInterface.methods:
-                if no method with superMethod.name exists in interfaceType:
-                    interfaceType.methods.push_back(superMethod)
-                    hasChanges = true
-
-if iteration >= 1000:
-    error: "circular interface inheritance detected: method propagation did not converge"
-```
-
-This iterates until no new methods are added (fixed-point convergence). The 1000-iteration cap protects against circular inheritance.
-
-### Phase 4 — Method Order Stabilization
-
-At `analyzer.cpp:387-438`, method order is stabilized for itable slot assignment:
-
-```
-methodOrderChanged = true
-while methodOrderChanged and limit > 0:
-    methodOrderChanged = false
-    for declaration in program.declarations where InterfaceDeclaration:
-        interfaceType = lookupType(declaration.name)
-
-        orderedNames = []
-        addedNames = set()
-
-        // super-interface methods first (in their order)
-        for superInterface in interfaceType.superInterfaces:
-            for methodName in superInterface.methodOrder:
-                if methodName not in addedNames:
-                    orderedNames.push_back(methodName)
-                    addedNames.insert(methodName)
-
-        // own methods after super-interface methods
-        for method in interfaceType.methods:
-            if method.name not in addedNames:
-                orderedNames.push_back(method.name)
-                addedNames.insert(method.name)
-
-        if orderedNames != interfaceType.methodOrder:
-            // reorder methods to match orderedNames
-            reorderedMethods = []
-            for name in orderedNames:
-                find matching method, push to reorderedMethods
-            interfaceType.methods = reorderedMethods
-            interfaceType.methodOrder = orderedNames
-            // assign interfaceTableIndex per method
-            for index, method in interfaceType.methods:
-                method.interfaceTableIndex = index
-            methodOrderChanged = true
-```
-
-Method ordering ensures:
-1. Super-interface methods appear first, in the order defined by the super-interface
-2. Own methods appear after inherited ones
-3. `interfaceTableIndex` matches position in `methodOrder`
-4. All classes implementing the same interface agree on slot assignments
-
-### Full Interface Analysis
-
-At `analyzer.cpp:3186-3249`, the second-pass analysis handles:
-
-```
-analyzeInterfaceDeclaration(declaration):
-    interfaceType = lookupType(declaration.name)
-    if not already pre-registered:
-        register generic parameters
-        resolve super-interfaces and copy their methods
-    else:
-        re-register existing generic parameters
-
-    pushScope(Class)
-    currentScope.classType = interfaceType
-
-    for method in declaration.methods:
-        analyzeDeclaration(method)
-        if not pre-registered:
-            resolve parameter types, return type
-            create MethodInfo (isVirtual = true)
-            interfaceType.methods.push_back(methodInfo)
-
-    for nestedDeclaration in declaration.nestedDeclarations:
-        analyzeDeclaration(nestedDeclaration)
-    popScope()
-```
-
-### Interface Validation
-
-`validateInterfaceImplementation()` at `analyzer.cpp:5289-5351` checks class compliance:
-
-```
-validateInterfaceImplementation(classType, interfaceType, source):
-    for method in interfaceType.methods:
-        found = false
-        nameExists = false
-        for implMethod in classType.methods:
-            if implMethod.name != method.name:
-                continue
-            nameExists = true
-            if parameter counts match and return type assignable:
-                found = true
-                break
-
-        if not found:
-            if not nameExists:
-                error: "class does not implement method required by interface"
-            else:
-                error: "method has wrong signature for interface"
-```
-
-Validation checks:
-1. Method name exists in the class
-2. Parameter count matches
-3. Return type is assignable (with generic base-name fallback for generic return types)
-
-Missing methods emit: `"class \"Circle\" does not implement method \"describe\" required by interface \"Describable\""`
-
-Wrong signatures emit: `"method \"describe\" in class \"Circle\" has wrong signature for interface \"Describable\""`
-
----
-
-## Implementation Checking
-
-### implementsInterface
-
-`ClassType::implementsInterface()` at `typeref.cpp:676-692` checks if a class directly or transitively implements an interface:
-
-```
-implementsInterface(qualifiedName):
-    for iface in interfaces:
-        if iface.qualified == qualifiedName or
-           qualname::startsWith(iface.qualified, qualifiedName):
-            return true
-        if iface.kind == Interface:
-            if iface.extendsInterface(qualifiedName):
-                return true
-    if baseClass exists and baseClass.kind == Class:
-        return baseClass.implementsInterface(qualifiedName)
-    return false
-```
-
-Three-level check:
-1. Direct interface match
-2. Transitive super-interface match via `extendsInterface()`
-3. Inherited interface match via base class chain
-
-### extendsInterface
-
-`InterfaceType::extendsInterface()` at `typeref.hpp:881-894` recursively walks the super-interface chain:
-
-```
-extendsInterface(qualifiedName):
-    for superIface in superInterfaces:
-        if superIface.qualified == qualifiedName: return true
-        if superIface is Interface:
-            if superIface.extendsInterface(qualifiedName): return true
-    return false
-```
-
----
-
-## Compilation Pipeline
-
-### HIR Stage
-
-HIR lowering at `hir/lowering.cpp:488-514` creates `HIRInterfaceDefinition`:
-
-```
-struct HIRInterfaceDefinition : HIRNode
-    interfaceName                    : std::string
-    interfaceQualifiedName           : std::string
-    accessModifier                   : AccessModifier
-    methodDefinitions                : std::vector<HIRFunctionDefinition>
-    genericParameters                : std::vector<HIRGenericParameterDescriptor>
-    superInterfaceQualifiedNames     : std::vector<std::string>
-    nestedDeclarations               : std::vector<HIRNodeSharedPointer>
-    isFinalInterface                 : bool
-```
-
-Interface methods are lowered as standard functions with `ownerClassName` set to the interface qualified name. These function definitions serve as default implementations — classes without their own override call the interface's default.
-
-### Codegen Stage — Interface Table Generation
-
-At `codegen.cpp:380-468`, itables are generated per class that implements interfaces:
-
-```
-for (className, classType) in userTypes where kind == Class:
-    if classType.interfaces empty: skip
-
-    for interface in classType.interfaces:
-        methodNames = interface.methodOrder (or interface.methods order)
-        if methodNames empty: skip
-
-        funcPtrType = PointerType::getUnqual(VoidFuncType)
-        itableEntries = []
-
-        for methodName in methodNames:
-            implFunc = lookup "ClassName.methodName" in functionResolutionMap
-            // try: fullQualified.methodName, then qualifiedBase.methodName, then shortName.methodName
-            if found:
-                itableEntries.push_back(BitCast(implFunc, funcPtrType))
-            else:
-                itableEntries.push_back(ConstantPointerNull)
-
-        itableArrayType = ArrayType(funcPtrType, entryCount)
-        itableGlobal = GlobalVariable(
-            itableArrayType, true, InternalLinkage,
-            ConstantArray(itableEntries),
-            "_MIR_itable_ClassName_InterfaceName"
-        )
-        interfaceTableMap[classQualified] = itableGlobal
-        interfaceTableMap[className] = itableGlobal
-```
-
-Each itable is a constant array of function pointers. Methods not found in the class get null entries. The itable is stored as an LLVM `GlobalVariable` with internal linkage.
-
-When a class is instantiated via `ConstructObject`, the itable pointer is stored in the object's first struct field (slot 0) — see `codegen.cpp:6284-6296`.
-
-### Codegen Stage — Interface Dispatch
-
-At `codegen.cpp:4330-4390`, interface method calls dispatch through the itable:
-
-```
-// load itable pointer from object's first field
-vtableSlotPtr = CreateStructGEP(wrapperStruct, receiverPtr, 0, "vtable.slot.ptr")
-vtablePtr = CreateLoad(ptrType, vtableSlotPtr, "vtable.ptr")
-
-// index into itable by method slot
-funcSlotPtr = CreateGEP(funcPtrType, vtablePtr, methodSlotIndex, "vfunc.slot.ptr")
-funcPtr = CreateLoad(funcPtrType, funcSlotPtr, "vfunc.ptr")
-
-// cast to expected function type and call
-castedFunc = CreateBitCast(funcPtr, ptr-to-callType, "vfunc.cast")
-callResult = CreateCall(callType, castedFunc, [receiverPtr, ...args])
-```
-
-The `methodSlotIndex` comes from the interface's `methodOrder` — the slot where the implementing class's function pointer was placed during itable construction. This ensures uniform dispatch regardless of the concrete class.
-
-### Codegen Stage — Abstract Class Dispatch
-
-At `codegen.cpp:4600-4757`, abstract class method calls use vtable identity comparison:
-
-```
-// collect concrete subclasses of abstract class
-concreteSubclasses = abstractClassSubclasses[abstractClassName]
-
-for each concrete subclass:
-    // find concrete method implementation
-    concreteMethod = functionResolutionMap["SubclassName.methodName"]
-    // get subclass vtable identifier
-    vtableId = classVtableIdentifier[subclassName]
-
-// at call site:
-vtablePtr = load receiver's vtable pointer (field 0)
-
-for each (concreteMethod, vtableId) in dispatchTargets:
-    castedId = BitCast(vtableId, ptrType)
-    isMatch = CreateICmpEQ(vtablePtr, castedId, "type.match")
-    if isMatch: branch to call block
-    else: branch to next check
-
-// call block: call concreteMethod with args
-// fallback block: call abstract base method
-// merge block: PHI node to unify return values
-```
-
-This generates a cascade of vtable identity comparisons — each concrete subclass's itable pointer is compared against the receiver's itable pointer. When a match is found, the concrete method is called directly (devirtualized). The fallback calls the base abstract method.
-
-The `abstractClassSubclasses` map is populated at `codegen.cpp:523-568` by walking all non-abstract classes and checking if any ancestor is abstract.
-
-### Codegen Stage — toLLVMType
-
-At `codegen.cpp:6648-6649`:
-
-```
-case Kind::Interface:
-    return PointerType::getUnqual(context)
-```
-
-Interface-typed variables are always opaque pointers — the concrete struct type is unknown at the call site.
-
----
-
-## Builtin Operator Interfaces
-
-Uranite defines operator interfaces in `src/uranite/semantic/qualnames.hpp` that enable operator overloading on classes:
-
-| Interface | Qualified Name | Methods | Operators |
-|---|---|---|---|
-| `Addable` | `uranite.operators.addable.Addable` | `add` | `+` |
-| `Subtractable` | `uranite.operators.subtractable.Subtractable` | `subtract`, `sub` | `-` |
-| `Multipliable` | `uranite.operators.multipliable.Multipliable` | `multiply`, `mul` | `*` |
-| `Dividable` | `uranite.operators.dividable.Dividable` | `divide`, `div` | `/` |
-| `Modulable` | `uranite.operators.modulable.Modulable` | `modulo`, `mod`, `remainder` | `%` |
-| `Equatable` | `uranite.operators.equatable.Equatable` | `equals`, `notEquals` | `==`, `!=` |
-| `Comparable` | `uranite.operators.comparable.Comparable` | `lessThan`, `greaterThan`, `lessOrEqual`, `greaterOrEqual` | `<`, `>`, `<=`, `>=` |
-| `Negatable` | `uranite.operators.negatable.Negatable` | `negate`, `neg` | unary `-` |
-| `Stringable` | `uranite.operators.stringable.Stringable` | `toString` | string conversion |
-| `Hashable` | `uranite.operators.hashable.Hashable` | `hashCode` | hash computation |
-| `Indexable` | `uranite.operators.indexable.Indexable` | `get` | `[]`, `in` |
-| `Iterable` | `uranite.iterators.iterable.Iterable` | `iterator` | `for-in` loops |
-| `Iterator` | `uranite.iterators.iterator.Iterator` | `has`, `next` | iterator protocol |
-| `Droper` | `uranite.memory.droper.Droper` | `drop` | automatic cleanup |
-
-The semantic analyzer checks for these interfaces when resolving binary operators on class types. For example, `a + b` where `a` is a class type checks `a.implementsInterface(qname::Addable)` — if true, the operator desugars to `a.add(b)`.
-
----
-
-## Assignability Rules
-
-| Assignment | Rule |
-|---|---|
-| `InterfaceName` → `InterfaceName` | Identity match |
-| `ClassName` → `InterfaceName` | Allowed if class implements interface |
-| `InterfaceName` → `Object` | Always allowed (universal supertype) |
-| `ChildInterface` → `ParentInterface` | Allowed via `extendsInterface()` check |
-| `InterfaceName` → `ClassName` | Not allowed (downcast requires explicit cast) |
-| `GenericParameter` | Always assignable |
-
----
-
-## Examples
-
-### Basic Interface Implementation
+A class uses the `implements` keyword to adopt an interface. The class must define every method declared by the interface with a matching signature.
 
 ```uranite
 from uranite.io.console import puts
 
-interface Describable:
-    public function describe( self ) -> Void
+public interface Greetable:
 
-class Circle implements Describable:
+    public function greet( self ) -> String;
 
-    public F64 radius
+class Person implements Greetable:
 
-    public function Circle( self, F64 radius ) -> Void:
-        self.radius = radius
+    public String name
 
-    public function describe( self ) -> Void:
-        puts( "Circle with radius ", self.radius )
+    public function Person( self, String name ) -> Void:
+        self.name = name
+
+    public function greet( self ) -> String:
+        return self.name
 
 public function main() -> I32:
-    Circle c = new Circle( 5.0 )
-    c.describe()
+    Person person = new Person( "Alice" )
+    puts( person.greet() )
     return 0
 ```
 
-`Circle` implements `Describable` by providing a `describe()` method. The compiler validates the signature matches at semantic analysis time.
+Output:
 
-### Multiple Interfaces
+```
+Alice
+```
+
+---
+
+## Multiple Method Contracts
+
+Interfaces can declare any number of methods.
+
+```uranite
+public interface Validator:
+
+    public function isValid( self ) -> Boolean;
+
+    public function errorMessage( self ) -> String;
+```
+
+Implementing classes must provide all declared methods.
+
+```uranite
+class AgeValidator implements Validator:
+
+    public I64 age
+
+    public function AgeValidator( self, I64 age ) -> Void:
+        self.age = age
+
+    public function isValid( self ) -> Boolean:
+        if self.age >= 0:
+            if self.age <= 150:
+                return True
+        return False
+
+    public function errorMessage( self ) -> String:
+        return "Invalid age"
+```
+
+---
+
+## Multiple Interfaces
+
+A class can implement multiple interfaces by separating them with commas.
+
+```uranite
+public interface Printable:
+
+    public function display( self ) -> String;
+
+public interface Measurable:
+
+    public function measure( self ) -> I64;
+
+class Widget implements Printable, Measurable:
+
+    public String label
+    public I64 weight
+
+    public function Widget( self, String label, I64 weight ) -> Void:
+        self.label = label
+        self.weight = weight
+
+    public function display( self ) -> String:
+        return self.label
+
+    public function measure( self ) -> I64:
+        return self.weight
+```
+
+The class must implement every method from every interface it adopts.
+
+---
+
+## Interface Inheritance
+
+Interfaces can extend other interfaces using the `extends` keyword. An interface can extend multiple parent interfaces, separated by commas.
 
 ```uranite
 from uranite.io.console import puts
 
-interface Describable:
-    public function describe( self ) -> Void
+public interface Sizeable:
 
-interface Measurable:
-    public function measure( self ) -> I64
+    public function size( self ) -> I64;
 
-class Square implements Describable, Measurable:
+public interface Nameable:
+
+    public function label( self ) -> String;
+
+public interface Describable extends Sizeable, Nameable:
+
+    public function describe( self ) -> String;
+
+class Item implements Describable:
+
+    public String itemName
+    public I64 itemSize
+
+    public function Item( self, String itemName, I64 itemSize ) -> Void:
+        self.itemName = itemName
+        self.itemSize = itemSize
+
+    public function size( self ) -> I64:
+        return self.itemSize
+
+    public function label( self ) -> String:
+        return self.itemName
+
+    public function describe( self ) -> String:
+        return self.itemName
+
+public function main() -> I32:
+    Item item = new Item( "Widget", 42 )
+    puts( item.label() )
+    puts( item.size().toString() )
+    puts( item.describe() )
+    return 0
+```
+
+Output:
+
+```
+Widget
+42
+Widget
+```
+
+A class implementing `Describable` must also implement methods from `Sizeable` and `Nameable`, since `Describable` extends both.
+
+---
+
+## Generic Interfaces
+
+Interfaces can accept type parameters, making them work with any type.
+
+```uranite
+from uranite.io.console import puts
+
+public interface Converter<T>:
+
+    public function convert( self ) -> T;
+
+class Temperature implements Converter<I64>:
+
+    public I64 celsius
+
+    public function Temperature( self, I64 celsius ) -> Void:
+        self.celsius = celsius
+
+    public function convert( self ) -> I64:
+        return self.celsius * 9 / 5 + 32
+
+public function main() -> I32:
+    Temperature temp = new Temperature( 100 )
+    I64 fahrenheit = temp.convert()
+    puts( fahrenheit.toString() )
+    return 0
+```
+
+Output:
+
+```
+212
+```
+
+When implementing a generic interface, the class specifies concrete types for the type parameters.
+
+---
+
+## Polymorphic Dispatch
+
+When a function parameter is typed as an interface, any class implementing that interface can be passed as an argument. The correct method implementation is called at runtime based on the actual object type.
+
+```uranite
+from uranite.io.console import puts
+
+public interface Shape:
+
+    public function area( self ) -> I64;
+
+    public function name( self ) -> String;
+
+class Circle implements Shape:
+
+    public I64 radius
+
+    public function Circle( self, I64 radius ) -> Void:
+        self.radius = radius
+
+    public function area( self ) -> I64:
+        return 3 * self.radius * self.radius
+
+    public function name( self ) -> String:
+        return "Circle"
+
+class Square implements Shape:
 
     public I64 side
 
     public function Square( self, I64 side ) -> Void:
         self.side = side
 
-    public function describe( self ) -> Void:
-        puts( "Square with side ", self.side )
-
-    public function measure( self ) -> I64:
+    public function area( self ) -> I64:
         return self.side * self.side
 
-class Rectangle extends Shape implements Describable:
+    public function name( self ) -> String:
+        return "Square"
 
-    public F64 width
-    public F64 height
-
-    public function Rectangle( self, F64 w, F64 h ) -> Void:
-        self.kind = "Rectangle"
-        self.width = w
-        self.height = h
-
-    public function describe( self ) -> Void:
-        puts( "Rectangle ", self.width, " x ", self.height )
+public function printShape( Shape shape ) -> Void:
+    puts( shape.name() )
+    puts( shape.area().toString() )
 
 public function main() -> I32:
-    Square sq = new Square( 4 )
-    sq.describe()
-    puts( "Square area = ", sq.measure() )
+    Circle circle = new Circle( 5 )
+    printShape( circle )
+
+    Square square = new Square( 4 )
+    printShape( square )
     return 0
 ```
 
-`Square` implements both `Describable` and `Measurable`. The compiler generates an itable for each interface — `_MIR_itable_Square_Describable` with `describe` slot, and `_MIR_itable_Square_Measurable` with `measure` slot. `Rectangle` extends `Shape` and implements `Describable`, combining inheritance with interface compliance.
+Output:
 
-### Interface Dispatch
+```
+Circle
+75
+Square
+16
+```
+
+The `printShape` function accepts any `Shape` implementation. When called with a `Circle`, it dispatches to `Circle.name()` and `Circle.area()`. When called with a `Square`, it dispatches to the `Square` implementations.
+
+---
+
+## Interface-Typed Parameters
+
+Functions can accept interface-typed parameters to operate on any implementing class.
+
+```uranite
+public interface Validator:
+
+    public function isValid( self ) -> Boolean;
+
+    public function errorMessage( self ) -> String;
+
+public function validate( Validator validator ) -> Void:
+    if validator.isValid():
+        puts( "Valid" )
+    else:
+        puts( validator.errorMessage() )
+```
+
+Any class implementing `Validator` can be passed to `validate`.
+
+---
+
+## Method Reference
+
+### Declaration Syntax
+
+| Syntax | Description |
+|---|---|
+| `public interface Name:` | Declares an interface |
+| `public function method( self ) -> Type;` | Declares a method signature |
+| `extends InterfaceA, InterfaceB` | Inherits from parent interfaces |
+| `implements InterfaceA, InterfaceB` | Class adopts interfaces |
+
+### Implementation Rules
+
+| Rule | Description |
+|---|---|
+| All methods required | A class must implement every method from every adopted interface |
+| Signature match | Parameter types and return type must match exactly |
+| Inherited methods | Extending an interface inherits all parent methods |
+| Multiple implementation | A class can implement any number of interfaces |
+
+---
+
+## Examples
+
+### Shape Hierarchy
 
 ```uranite
 from uranite.io.console import puts
 
-public interface Greeter:
-    public function greet( self ) -> Void;
+public interface Shape:
 
-public class EnglishGreeter implements Greeter:
+    public function area( self ) -> I64;
 
-    public Int id
+    public function name( self ) -> String;
 
-    public function EnglishGreeter( self, Int id ) -> Void:
-        self.id = id
+class Rectangle implements Shape:
 
-    public function greet( self ) -> Void:
-        puts( "Hello, World!" )
+    public I64 width
+    public I64 height
 
-public class SpanishGreeter implements Greeter:
+    public function Rectangle( self, I64 width, I64 height ) -> Void:
+        self.width = width
+        self.height = height
 
-    public Int id
+    public function area( self ) -> I64:
+        return self.width * self.height
 
-    public function SpanishGreeter( self, Int id ) -> Void:
-        self.id = id
+    public function name( self ) -> String:
+        return "Rectangle"
 
-    public function greet( self ) -> Void:
-        puts( "Hola, Mundo!" )
+class Triangle implements Shape:
 
-public function callGreet( Greeter g ) -> Void:
-    g.greet()
+    public I64 base
+    public I64 height
+
+    public function Triangle( self, I64 base, I64 height ) -> Void:
+        self.base = base
+        self.height = height
+
+    public function area( self ) -> I64:
+        return self.base * self.height / 2
+
+    public function name( self ) -> String:
+        return "Triangle"
+
+public function printShape( Shape shape ) -> Void:
+    puts( shape.name() )
+    puts( shape.area().toString() )
 
 public function main() -> I32:
-    Greeter eng = new EnglishGreeter( 1 )
-    callGreet( eng )
-    Greeter spa = new SpanishGreeter( 2 )
-    callGreet( spa )
+    Rectangle rect = new Rectangle( 6, 4 )
+    printShape( rect )
+
+    Triangle tri = new Triangle( 10, 5 )
+    printShape( tri )
     return 0
 ```
 
-`callGreet()` accepts a `Greeter`-typed parameter — an opaque pointer at LLVM level. When `g.greet()` is called, the compiler emits itable dispatch: load the vtable pointer from the receiver's first field, index into it at the `greet` slot (index 0 in `Greeter.methodOrder`), load the function pointer, and call it. `EnglishGreeter` dispatches to `EnglishGreeter.greet`, `SpanishGreeter` dispatches to `SpanishGreeter.greet` — same call site, different implementations, resolved at runtime through the itable pointer stored at construction time.
+Output:
+
+```
+Rectangle
+24
+Triangle
+25
+```
+
+### Validator Pattern
+
+```uranite
+from uranite.io.console import puts
+
+public interface Validator:
+
+    public function isValid( self ) -> Boolean;
+
+    public function errorMessage( self ) -> String;
+
+class RangeValidator implements Validator:
+
+    public I64 value
+    public I64 minimum
+    public I64 maximum
+
+    public function RangeValidator( self, I64 value, I64 minimum, I64 maximum ) -> Void:
+        self.value = value
+        self.minimum = minimum
+        self.maximum = maximum
+
+    public function isValid( self ) -> Boolean:
+        if self.value >= self.minimum:
+            if self.value <= self.maximum:
+                return True
+        return False
+
+    public function errorMessage( self ) -> String:
+        return "Value out of range"
+
+public function validate( Validator validator ) -> Void:
+    if validator.isValid():
+        puts( "Valid" )
+    else:
+        puts( validator.errorMessage() )
+
+public function main() -> I32:
+    RangeValidator valid = new RangeValidator( 50, 0, 100 )
+    validate( valid )
+
+    RangeValidator invalid = new RangeValidator( 200, 0, 100 )
+    validate( invalid )
+    return 0
+```
+
+Output:
+
+```
+Valid
+Value out of range
+```
+
+### Temperature Converter
+
+```uranite
+from uranite.io.console import puts
+
+public interface Converter<T>:
+
+    public function convert( self ) -> T;
+
+class CelsiusToFahrenheit implements Converter<I64>:
+
+    public I64 celsius
+
+    public function CelsiusToFahrenheit( self, I64 celsius ) -> Void:
+        self.celsius = celsius
+
+    public function convert( self ) -> I64:
+        return self.celsius * 9 / 5 + 32
+
+public function main() -> I32:
+    CelsiusToFahrenheit boiling = new CelsiusToFahrenheit( 100 )
+    puts( boiling.convert().toString() )
+
+    CelsiusToFahrenheit freezing = new CelsiusToFahrenheit( 0 )
+    puts( freezing.convert().toString() )
+
+    CelsiusToFahrenheit body = new CelsiusToFahrenheit( 37 )
+    puts( body.convert().toString() )
+    return 0
+```
+
+Output:
+
+```
+212
+32
+98
+```
+
+### Describable Items
+
+```uranite
+from uranite.io.console import puts
+
+public interface Sizeable:
+
+    public function size( self ) -> I64;
+
+public interface Nameable:
+
+    public function label( self ) -> String;
+
+public interface Describable extends Sizeable, Nameable:
+
+    public function describe( self ) -> String;
+
+class Product implements Describable:
+
+    public String productName
+    public I64 productWeight
+
+    public function Product( self, String productName, I64 productWeight ) -> Void:
+        self.productName = productName
+        self.productWeight = productWeight
+
+    public function size( self ) -> I64:
+        return self.productWeight
+
+    public function label( self ) -> String:
+        return self.productName
+
+    public function describe( self ) -> String:
+        return self.productName
+
+public function main() -> I32:
+    Product laptop = new Product( "Laptop", 2500 )
+    puts( laptop.label() )
+    puts( laptop.size().toString() )
+    puts( laptop.describe() )
+
+    Product phone = new Product( "Phone", 180 )
+    puts( phone.label() )
+    puts( phone.size().toString() )
+    return 0
+```
+
+Output:
+
+```
+Laptop
+2500
+Laptop
+Phone
+180
+```

@@ -1,746 +1,403 @@
-# Meta Types, instanceof, and subclassof
-
-Uranite provides three type-level operations that treat types as first-class entities at the semantic layer: `Meta<T>` (type-as-value), `instanceof` (runtime type checking), and `subclassof` (compile-time inheritance testing). `Meta<T>` wraps any type into a value that can be stored in variables, passed as arguments, and compared — created by the `TypeReferenceExpression` AST node when a type name appears in expression context, resolved to `MetaType` by the semantic analyzer via `Registry::makeMeta`. `instanceof` checks whether a value belongs to a specific type, producing a `Boolean` result through `InstanceofExpression` AST, `HIRInstanceOf` HIR, `InstanceOfCheck` MIR instruction, and compile-time LLVM constant folding with inheritance chain traversal. `subclassof` checks inheritance relationships between two types, producing a `Boolean` via `SubclassofExpression` AST and `HIRSubclassOf` HIR — currently without MIR lowering or codegen implementation.
-
-This document covers all three type-level operations: `Meta<T>` type wrapping with `MetaType` struct and covariant assignability, `instanceof` from parsing through MIR codegen with compile-time constant folding, and `subclassof` with its current AST/semantic/HIR-only implementation status.
+# Meta Types and instanceof
 
 ---
 
 ## Table of Contents
 
-- [Meta Types — Type as Value](#meta-types--type-as-value)
+- [Meta Types and instanceof](#meta-types-and-instanceof)
+  - [Table of Contents](#table-of-contents)
   - [Overview](#overview)
-  - [Syntax](#syntax)
-  - [AST Representation — TypeReferenceExpression](#ast-representation--typereferenceexpression)
-  - [Semantic Analysis](#semantic-analysis)
-  - [MetaType Struct](#metatype-struct)
-  - [Registry::makeMeta](#registrymakemeta)
-  - [Assignability Rules](#assignability-rules)
-  - [Comparability Rules](#comparability-rules)
-  - [Variable Declaration Auto-Wrapping](#variable-declaration-auto-wrapping)
-  - [HIR Stage — HIRTypeReference](#hir-stage--hirtypereference)
-  - [MIR and Codegen Status](#mir-and-codegen-status)
-- [instanceof Operator](#instanceof-operator)
-  - [Syntax](#instanceof-syntax)
-  - [AST Representation — InstanceofExpression](#ast-representation--instanceofexpression)
-  - [Parsing](#instanceof-parsing)
-  - [Semantic Analysis](#instanceof-semantic-analysis)
-  - [HIR Stage — HIRInstanceOf](#hir-stage--hirinstanceof)
-  - [MIR Lowering — InstanceOfCheck](#mir-lowering--instanceofcheck)
-  - [MIR Codegen — Compile-Time Constant Folding](#mir-codegen--compile-time-constant-folding)
-- [subclassof Operator](#subclassof-operator)
-  - [Syntax](#subclassof-syntax)
-  - [AST Representation — SubclassofExpression](#ast-representation--subclassofexpression)
-  - [Parsing](#subclassof-parsing)
-  - [Semantic Analysis](#subclassof-semantic-analysis)
-  - [HIR Stage — HIRSubclassOf](#hir-stage--hirsubclassof)
-  - [MIR and Codegen Status](#subclassof-mir-and-codegen-status)
-- [Type Kind Enumeration](#type-kind-enumeration)
-- [Examples](#examples)
+  - [The instanceof Operator](#the-instanceof-operator)
+    - [Same-Type Check](#same-type-check)
+    - [Parent Class Check](#parent-class-check)
+    - [Negative Check](#negative-check)
+    - [Primitive Type Check](#primitive-type-check)
+    - [instanceof in Conditions](#instanceof-in-conditions)
+  - [Meta Types](#meta-types)
+    - [Declaring Meta Variables](#declaring-meta-variables)
+  - [Method Reference](#method-reference)
+    - [instanceof Syntax](#instanceof-syntax)
+    - [Meta Type Syntax](#meta-type-syntax)
+  - [Examples](#examples)
+    - [Class Hierarchy Type Checking](#class-hierarchy-type-checking)
+    - [Primitive Type Verification](#primitive-type-verification)
+    - [Type Guard Pattern](#type-guard-pattern)
+    - [Multi-Level Inheritance Check](#multi-level-inheritance-check)
 
 ---
 
-## Meta Types — Type as Value
+## Overview
 
-### Overview
+The `instanceof` operator checks whether a value belongs to a specific type, producing a `Boolean` result. It performs compile-time type checking against the declared type of the value and the target type, including class inheritance chains.
 
-`Meta<T>` represents a type itself used as a value. When a type name appears in expression context (not as a type annotation), the semantic analyzer wraps it in `MetaType`, producing a value whose semantic type is `Meta<T>` where `T` is the referenced type. This enables storing types in variables, passing them as function arguments, and performing type comparisons at the value level.
-
-### Syntax
-
-```
-Meta<String> myType = String
-Meta<I64> numericType = I64
-
-function acceptType(Meta<Object> typeValue) -> Void:
-    pass
-```
-
-When a bare type name appears on the right side of an assignment or in expression context, it becomes a `TypeReferenceExpression` that resolves to `Meta<ThatType>`.
-
-### AST Representation — TypeReferenceExpression
-
-Defined in `src/uranite/ast/node.hpp:1866-1883`:
-
-```cpp
-struct TypeReferenceExpression : Expression {
-
-    std::string typeName;
-
-    TypeReferenceExpression(
-        const std::string& name,
-        const lookup::SourceSharedPointer& source
-    ) : Expression( Node::Kind::TypeReferenceExpression,
-            source ),
-        typeName( name ) {
-    }
-
-};
-```
-
-The `TypeReferenceExpression` stores only the type name as a string. It represents the appearance of a type identifier in expression position — not a type annotation. The semantic analyzer resolves this name and wraps the result in `MetaType`.
-
-### Semantic Analysis
-
-At `src/uranite/semantic/analyzer.cpp:2426-2438`:
-
-```cpp
-case ast::Node::Kind::TypeReferenceExpression: {
-    ast::nodes::TypeReferenceExpression&
-        typeReferenceExpression =
-        static_cast<ast::nodes::TypeReferenceExpression&>(
-            *expression );
-    TypeSharedPointer resolvedReferenceType =
-        this->typeRegistry.lookupType(
-            typeReferenceExpression.typeName );
-    if( resolvedReferenceType ) {
-        expressionType =
-            this->typeRegistry.makeMeta(
-                resolvedReferenceType );
-    }
-    else {
-        std::string unknownTypeErrorMessage =
-            fmt::format( "unknown type \"{}\"",
-                typeReferenceExpression.typeName );
-        this->diagnostic.error( expression->source,
-            unknownTypeErrorMessage );
-        expressionType = this->typeRegistry.getError();
-    }
-    break;
-}
-```
-
-Resolution steps:
-1. Extract the `typeName` from `TypeReferenceExpression`.
-2. Look up the type in the registry via `lookupType` — follows the standard 3-tier resolution (user types, aliases, primitives).
-3. If found, wrap in `Meta<T>` via `Registry::makeMeta`.
-4. If not found, emit diagnostic error and fall back to `Error` sentinel type.
-
-### MetaType Struct
-
-Defined in `src/uranite/semantic/typeref.hpp:1016-1028`:
-
-```cpp
-struct MetaType : Type {
-
-    TypeSharedPointer innerType;
-
-    MetaType( TypeSharedPointer innerType )
-        : Type( Type::Kind::Meta,
-            fmt::format( "Meta<{}>",
-                innerType->name ) ),
-          innerType( std::move( innerType ) ) {
-    }
-
-};
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `innerType` | `TypeSharedPointer` | The wrapped type that this meta-type represents as a value |
-
-The `name` is constructed as `"Meta<InnerTypeName>"` using `fmt::format`. The `Kind` is `Type::Kind::Meta` (enum value at `typeref.hpp:58`).
-
-### Registry::makeMeta
-
-Factory method at `src/uranite/semantic/typeref.cpp:628-630`:
-
-```cpp
-TypeSharedPointer Registry::makeMeta(
-    TypeSharedPointer inner ) {
-    return std::make_shared<MetaType>(
-        std::move( inner ) );
-}
-```
-
-Declared in `src/uranite/semantic/typeref.hpp:1413`. Creates a fresh `MetaType` wrapping the provided inner type. No caching or deduplication — each call produces a new `MetaType` instance. Follows the same pattern as `makeOptional`, `makeFuture`, and `makeGenerator`.
-
-### Assignability Rules
-
-At `src/uranite/semantic/typeref.cpp:467-471`:
-
-```cpp
-if( target->kind == Type::Kind::Meta &&
-    source->kind == Type::Kind::Meta ) {
-    MetaTypeSharedPointer targetMetaType =
-        std::static_pointer_cast<MetaType>( target );
-    MetaTypeSharedPointer sourceMetaType =
-        std::static_pointer_cast<MetaType>( source );
-    return this->isAssignable(
-        targetMetaType->innerType,
-        sourceMetaType->innerType );
-}
-```
-
-`Meta<T>` assignability is **covariant**: `Meta<A>` is assignable to `Meta<B>` if and only if `A` is assignable to `B`. This means `Meta<String>` is assignable to `Meta<Object>` (since `String` is assignable to `Object`), but `Meta<Object>` is not assignable to `Meta<String>`.
-
-Both operands must have `Kind::Meta` — there is no implicit wrapping or unwrapping at the assignability level. The wrapping logic exists only in variable declaration analysis (see below).
-
-### Comparability Rules
-
-At `src/uranite/semantic/typeref.cpp:576-578`:
-
-```cpp
-if( x->kind == Type::Kind::Meta &&
-    y->kind == Type::Kind::Meta ) {
-    return true;
-}
-```
-
-All `Meta<T>` values are comparable with each other, regardless of inner type. `Meta<String>` can be compared with `Meta<I64>` — the comparison checks type identity, not type compatibility. This unconditional comparability enables runtime type comparison patterns.
-
-### Variable Declaration Auto-Wrapping
-
-At `src/uranite/semantic/analyzer.cpp:4040-4041`:
-
-```cpp
-if( variableType &&
-    variableType->kind == Type::Kind::Meta &&
-    initializerType &&
-    initializerType->kind != Type::Kind::Meta ) {
-    initializerType =
-        this->typeRegistry.makeMeta( initializerType );
-}
-```
-
-When a variable is declared with an explicit `Meta<T>` type annotation and the initializer expression resolves to a non-Meta type, the analyzer auto-wraps the initializer type in `Meta<>`. This enables the pattern:
-
-```
-Meta<String> myType = String
-```
-
-Where `String` on the right side resolves as a type reference but might not yet be wrapped — the analyzer ensures the initializer type is lifted to `Meta<String>` before the assignability check at `analyzer.cpp:4046`.
-
-### HIR Stage — HIRTypeReference
-
-Defined in `src/uranite/ir/hir.hpp:933-945`:
-
-```cpp
-struct HIRTypeReference : HIRNode {
-
-    std::string referencedTypeName;
-
-    HIRTypeReference(
-        const std::string& referencedTypeName,
-        semantic::TypeSharedPointer resolvedType,
-        const lookup::SourceSharedPointer& sourceLocation
-    ) : HIRNode( HIRNodeKind::TypeReference,
-            std::move( resolvedType ), sourceLocation ),
-        referencedTypeName( referencedTypeName ) {
-    }
-
-};
-```
-
-HIR lowering at `src/uranite/ir/hir/lowering.cpp:1097-1099`:
-
-```cpp
-case ast::Node::Kind::TypeReferenceExpression: {
-    ast::nodes::TypeReferenceExpression& typeReference =
-        static_cast<ast::nodes::TypeReferenceExpression&>(
-            *expression );
-    return std::make_shared<HIRTypeReference>(
-        typeReference.typeName,
-        expression->semanticType,
-        expression->source );
-}
-```
-
-The HIR node preserves the type name string and carries the resolved `MetaType` as `resolvedType`.
-
-### MIR and Codegen Status
-
-`HIRTypeReference` has **no corresponding MIR lowering or codegen implementation**. The `TypeReference` HIR node kind is not handled in the MIR lowering switch statement at `src/uranite/ir/mir/lowering.cpp`. This means `Meta<T>` values exist only at the semantic and HIR levels — they are not yet emitted as runtime values in the MIR/LLVM pipeline.
+`Meta<T>` represents a type itself as a value. When a type name appears in expression context, it is wrapped in `Meta<T>`, allowing types to be stored in variables.
 
 ---
 
-## instanceof Operator
+## The instanceof Operator
 
-### Syntax {#instanceof-syntax}
+### Same-Type Check
 
-```
-if value instanceof MyClass:
-    pass
+The `instanceof` operator returns `True` when the value's type matches the target type exactly.
 
-Boolean check = someObject instanceof String
-```
+```uranite
+from uranite.io.console import puts
 
-The `instanceof` operator tests whether a value's type matches a specified target type. Returns `Boolean`.
+public function main() -> I32:
+    String text = "hello"
+    Boolean isString = text instanceof String
+    puts( isString.toString() )
 
-### AST Representation — InstanceofExpression
-
-Defined in `src/uranite/ast/node.hpp:1479-1502`:
-
-```cpp
-struct InstanceofExpression : Expression {
-
-    ExpressionSharedPointer object;
-    TypeNodeSharedPointer targetType;
-
-    InstanceofExpression(
-        ExpressionSharedPointer object,
-        TypeNodeSharedPointer targetType,
-        const lookup::SourceSharedPointer& source
-    ) : Expression( Node::Kind::InstanceofExpression,
-            source ),
-        object( std::move( object ) ),
-        targetType( std::move( targetType ) ) {
-    }
-
-};
+    I64 number = 42
+    Boolean isI64 = number instanceof I64
+    puts( isI64.toString() )
+    return 0
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `object` | `ExpressionSharedPointer` | Value expression being type-checked |
-| `targetType` | `TypeNodeSharedPointer` | Type to check against |
+Output:
 
-### Parsing {#instanceof-parsing}
-
-At `src/uranite/parser/parser.cpp:2161-2166`:
-
-```cpp
-if( kind == token::Type::KeywordInstanceOf ) {
-    lookup::SourceSharedPointer source =
-        this->current().source;
-    this->advance();
-    ast::nodes::TypeNodeSharedPointer type =
-        this->parseTypeNode();
-    left = std::make_shared<
-        ast::nodes::InstanceofExpression>(
-        left, type, source );
-    continue;
-}
+```
+True
+True
 ```
 
-Parsed as an infix operator. The left operand is the value expression, the right operand is a type node parsed via `parseTypeNode()`. Sits in the binary expression parsing loop alongside `as` (cast) and `subclassof`.
+### Parent Class Check
 
-### Semantic Analysis {#instanceof-semantic-analysis}
+The `instanceof` operator returns `True` when the value's type is a subclass of the target type.
 
-At `src/uranite/semantic/analyzer.cpp:2321-2326`:
+```uranite
+from uranite.io.console import puts
 
-```cpp
-case ast::Node::Kind::InstanceofExpression: {
-    ast::nodes::InstanceofExpression&
-        instanceOfExpression =
-        static_cast<ast::nodes::InstanceofExpression&>(
-            *expression );
-    this->analyzeExpression(
-        instanceOfExpression.object );
-    this->resolveType(
-        instanceOfExpression.targetType );
-    expressionType = this->typeRegistry.getBool();
-    break;
-}
+class Animal:
+
+    public function Animal( self ) -> Void:
+        pass
+
+class Dog extends Animal:
+
+    public function Dog( self ) -> Void:
+        parent()
+
+public function main() -> I32:
+    Dog dog = new Dog()
+    Boolean isDog = dog instanceof Dog
+    Boolean isAnimal = dog instanceof Animal
+    puts( isDog.toString() )
+    puts( isAnimal.toString() )
+    return 0
 ```
 
-Analysis steps:
-1. Analyze the object expression (for side effects and type resolution).
-2. Resolve the target type annotation.
-3. Result type is unconditionally `Boolean` — no compile-time validation of whether the check is meaningful.
+Output:
 
-### HIR Stage — HIRInstanceOf
-
-Defined in `src/uranite/ir/hir.hpp:948-962`:
-
-```cpp
-struct HIRInstanceOf : HIRNode {
-
-    HIRNodeSharedPointer checkedExpression;
-    semantic::TypeSharedPointer checkedType;
-
-    HIRInstanceOf(
-        HIRNodeSharedPointer checkedExpression,
-        semantic::TypeSharedPointer checkedType,
-        const lookup::SourceSharedPointer& sourceLocation
-    ) : HIRNode( HIRNodeKind::InstanceOf,
-            nullptr, sourceLocation ),
-        checkedExpression(
-            std::move( checkedExpression ) ),
-        checkedType( std::move( checkedType ) ) {
-    }
-
-};
+```
+True
+True
 ```
 
-HIR lowering at `src/uranite/ir/hir/lowering.cpp:1101-1105`:
+A `Dog` is both a `Dog` and an `Animal` because `Dog` extends `Animal`.
 
-```cpp
-case ast::Node::Kind::InstanceofExpression: {
-    ast::nodes::InstanceofExpression&
-        instanceofExpression =
-        static_cast<ast::nodes::InstanceofExpression&>(
-            *expression );
-    HIRNodeSharedPointer checkedExpression =
-        this->lowerExpression(
-            instanceofExpression.object );
-    semantic::TypeSharedPointer checkedType =
-        this->resolveTypeNode(
-            instanceofExpression.targetType );
-    return std::make_shared<HIRInstanceOf>(
-        std::move( checkedExpression ),
-        checkedType, expression->source );
-}
+### Negative Check
+
+The `instanceof` operator returns `False` when the types do not match.
+
+```uranite
+from uranite.io.console import puts
+
+class Animal:
+
+    public function Animal( self ) -> Void:
+        pass
+
+class Dog extends Animal:
+
+    public function Dog( self ) -> Void:
+        parent()
+
+public function main() -> I32:
+    Animal animal = new Animal()
+    Boolean isDog = animal instanceof Dog
+    puts( isDog.toString() )
+
+    String text = "hello"
+    Boolean isI64 = text instanceof I64
+    puts( isI64.toString() )
+    return 0
 ```
 
-### MIR Lowering — InstanceOfCheck
+Output:
 
-At `src/uranite/ir/mir/lowering.cpp:2479-2489`:
-
-```cpp
-case hir::HIRNodeKind::InstanceOf: {
-    hir::HIRInstanceOf& instanceNode =
-        static_cast<hir::HIRInstanceOf&>(
-            *hirExpression );
-    MIRVariableIdentifier checkedVariable =
-        this->lowerExpression(
-            instanceNode.checkedExpression );
-    MIRInstruction checkInstruction(
-        MIRInstructionKind::InstanceOfCheck );
-    checkInstruction.sourceOperands.push_back(
-        checkedVariable );
-    checkInstruction.operandType =
-        instanceNode.checkedType;
-    checkInstruction.sourceLocation =
-        instanceNode.sourceLocation;
-    semantic::TypeSharedPointer boolType =
-        std::make_shared<semantic::Type>(
-            semantic::Type::Kind::Bool,
-            semantic::qualname::classes::boolean::Name );
-    MIRVariableIdentifier resultVariable =
-        this->currentFunction->allocateVariable(
-            "_instanceof", boolType, false );
-    checkInstruction.destinationVariable = resultVariable;
-    return this->emitInstruction( checkInstruction );
-}
+```
+False
+False
 ```
 
-MIR lowering:
-1. Lower the checked expression to get a variable identifier.
-2. Create `InstanceOfCheck` MIR instruction with the checked variable as source operand.
-3. Store the target type in `operandType`.
-4. Allocate a `_instanceof` result variable with `Boolean` type.
-5. Emit instruction; result is the destination variable.
+An `Animal` is not a `Dog` (the parent is not an instance of the child). A `String` is not an `I64`.
 
-### MIR Codegen — Compile-Time Constant Folding
+### Primitive Type Check
 
-At `src/uranite/ir/mir/codegen.cpp:1331-1387`, `InstanceOfCheck` is resolved entirely at compile time through constant folding — no runtime type information (RTTI) is emitted:
+The `instanceof` operator works with primitive types.
 
-```cpp
-case MIRInstructionKind::InstanceOfCheck: {
-    if( instruction.destinationVariable != 0 ) {
-        bool isMatch = false;
-        if( instruction.operandType != nullptr &&
-            instruction.sourceOperands.empty() == false ) {
-            std::string targetTypeName =
-                instruction.operandType->name;
-            size_t bracketPos =
-                targetTypeName.find( '<' );
-            if( bracketPos != std::string::npos ) {
-                targetTypeName = targetTypeName.substr(
-                    0, bracketPos );
-            }
-            MIRVariableIdentifier sourceVar =
-                instruction.sourceOperands[0];
-            // ... lookup source type from descriptor table ...
-        }
-        this->setVariableValue(
-            instruction.destinationVariable,
-            isMatch
-                ? llvm::ConstantInt::getTrue(
-                    this->llvmContext )
-                : llvm::ConstantInt::getFalse(
-                    this->llvmContext ) );
-    }
-    break;
-}
+```uranite
+from uranite.io.console import puts
+
+public function main() -> I32:
+    I64 number = 42
+    String text = "hello"
+    Boolean flag = True
+
+    puts( (number instanceof I64).toString() )
+    puts( (text instanceof String).toString() )
+    puts( (flag instanceof Boolean).toString() )
+    return 0
 ```
 
-Compile-time resolution algorithm:
+Output:
 
-1. **Strip generic parameters**: Remove `<...>` suffix from both source and target type names. `ArrayList<String>` becomes `ArrayList`, `HashMap<K,V>` becomes `HashMap`. This means `instanceof` checks base type identity, not generic parameter compatibility.
+```
+True
+True
+True
+```
 
-2. **Direct name match**: Compare stripped source type name against stripped target type name. If equal, `isMatch = true`.
+### instanceof in Conditions
 
-3. **Inheritance chain traversal** (for `Kind::Class` source types): If direct match fails and source is a class, walk the `baseClass` chain:
-   ```cpp
-   semantic::TypeSharedPointer current =
-       classPtr->baseClass;
-   while( current != nullptr &&
-          isMatch == false ) {
-       std::string baseName = current->name;
-       // strip generics from baseName
-       if( baseName == targetTypeName ) {
-           isMatch = true;
-       }
-       if( current->kind ==
-           semantic::Type::Kind::Class ) {
-           current = static_cast<
-               semantic::ClassType*>(
-               current.get() )->baseClass;
-       }
-       else {
-           break;
-       }
-   }
-   ```
+The `instanceof` result can be used directly in `if` conditions.
 
-4. **Object fallback**: If source type name equals "Object" or matches target, `isMatch = true`.
+```uranite
+from uranite.io.console import puts
 
-5. **Missing descriptor fallback**: If the source variable has no type descriptor in the variable descriptor table, defaults to `isMatch = true` (optimistic).
+class Animal:
 
-6. **Emit constant**: Result is `llvm::ConstantInt::getTrue` or `llvm::ConstantInt::getFalse` — a compile-time constant, never a runtime check.
+    public function Animal( self ) -> Void:
+        pass
 
-**Key limitation**: Since `instanceof` resolves at compile time, it only works with statically known types. Dynamic dispatch scenarios where the runtime type differs from the static type (e.g., a `Dog` stored as `Animal`) will check against the static type `Animal`, not the runtime type `Dog`.
+class Dog extends Animal:
+
+    public function Dog( self ) -> Void:
+        parent()
+
+public function main() -> I32:
+    Dog dog = new Dog()
+    if dog instanceof Animal:
+        puts( "dog is an animal" )
+    Animal animal = new Animal()
+    if animal instanceof Dog:
+        puts( "should not print" )
+    else:
+        puts( "animal is not a dog" )
+    return 0
+```
+
+Output:
+
+```
+dog is an animal
+animal is not a dog
+```
 
 ---
 
-## subclassof Operator
+## Meta Types
 
-### Syntax {#subclassof-syntax}
+### Declaring Meta Variables
 
-```
-Boolean result = ChildClass subclassof ParentClass
-```
+`Meta<T>` wraps a type as a value. A bare type name in expression context becomes a `Meta<T>` value.
 
-The `subclassof` operator tests whether one type is a subclass of another. Both operands are type names (not value expressions). Returns `Boolean`.
+```uranite
+from uranite.io.console import puts
 
-### AST Representation — SubclassofExpression
-
-Defined in `src/uranite/ast/node.hpp:1776-1799`:
-
-```cpp
-struct SubclassofExpression : Expression {
-
-    TypeNodeSharedPointer sourceType;
-    TypeNodeSharedPointer targetType;
-
-    SubclassofExpression(
-        TypeNodeSharedPointer sourceType,
-        TypeNodeSharedPointer target,
-        const lookup::SourceSharedPointer& source
-    ) : Expression( Node::Kind::SubclassofExpression,
-            source ),
-        sourceType( std::move( sourceType ) ),
-        targetType( std::move( target ) ) {
-    }
-
-};
+public function main() -> I32:
+    Meta<String> stringType = String
+    Meta<I64> intType = I64
+    puts( "types stored" )
+    return 0
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `sourceType` | `TypeNodeSharedPointer` | Child type (left operand) |
-| `targetType` | `TypeNodeSharedPointer` | Parent type to check against (right operand) |
+Output:
 
-Unlike `instanceof`, both operands are type nodes — `subclassof` operates on types, not values.
-
-### Parsing {#subclassof-parsing}
-
-At `src/uranite/parser/parser.cpp:2168-2180`:
-
-```cpp
-if( kind == token::Type::KeywordSubclassOf ) {
-    lookup::SourceSharedPointer source =
-        this->current().source;
-    this->advance();
-    ast::nodes::TypeNodeSharedPointer type =
-        this->parseTypeNode();
-    left = std::make_shared<
-        ast::nodes::SubclassofExpression>(
-        std::make_shared<ast::nodes::SimpleTypeNode>(
-            static_cast<
-                ast::nodes::IdentifierExpression&>(
-                *left ).name,
-            left->source
-        ),
-        type,
-        source
-    );
-    continue;
-}
 ```
-
-Parsing details:
-1. Left operand must be an `IdentifierExpression` (a type name) — cast directly to extract the name.
-2. Left operand is wrapped in a `SimpleTypeNode` to convert from expression to type node.
-3. Right operand is parsed via `parseTypeNode()`.
-4. Both operands become `TypeNodeSharedPointer` in the `SubclassofExpression`.
-
-### Semantic Analysis {#subclassof-semantic-analysis}
-
-At `src/uranite/semantic/analyzer.cpp:2419-2424`:
-
-```cpp
-case ast::Node::Kind::SubclassofExpression: {
-    ast::nodes::SubclassofExpression&
-        subclassOfExpression =
-        static_cast<ast::nodes::SubclassofExpression&>(
-            *expression );
-    this->resolveType( subclassOfExpression.sourceType );
-    this->resolveType( subclassOfExpression.targetType );
-    expressionType = this->typeRegistry.getBool();
-    break;
-}
+types stored
 ```
-
-Both type operands are resolved. Result type is unconditionally `Boolean`. No compile-time evaluation of the inheritance relationship occurs during semantic analysis.
-
-### HIR Stage — HIRSubclassOf
-
-Defined in `src/uranite/ir/hir.hpp:965-979`:
-
-```cpp
-struct HIRSubclassOf : HIRNode {
-
-    semantic::TypeSharedPointer childType;
-    semantic::TypeSharedPointer parentType;
-
-    HIRSubclassOf(
-        semantic::TypeSharedPointer childType,
-        semantic::TypeSharedPointer parentType,
-        const lookup::SourceSharedPointer& sourceLocation
-    ) : HIRNode( HIRNodeKind::SubclassOf,
-            nullptr, sourceLocation ),
-        childType( std::move( childType ) ),
-        parentType( std::move( parentType ) ) {
-    }
-
-};
-```
-
-HIR lowering at `src/uranite/ir/hir/lowering.cpp:1107-1111`:
-
-```cpp
-case ast::Node::Kind::SubclassofExpression: {
-    ast::nodes::SubclassofExpression&
-        subclassofExpression =
-        static_cast<ast::nodes::SubclassofExpression&>(
-            *expression );
-    semantic::TypeSharedPointer childType =
-        this->resolveTypeNode(
-            subclassofExpression.sourceType );
-    semantic::TypeSharedPointer parentType =
-        this->resolveTypeNode(
-            subclassofExpression.targetType );
-    return std::make_shared<HIRSubclassOf>(
-        childType, parentType, expression->source );
-}
-```
-
-Both types are resolved to semantic `TypeSharedPointer` values. The `HIRSubclassOf` node carries the fully resolved child and parent types.
-
-### MIR and Codegen Status {#subclassof-mir-and-codegen-status}
-
-`HIRSubclassOf` has **no corresponding MIR lowering or codegen implementation**. The `SubclassOf` HIR node kind is not handled in the MIR lowering switch at `src/uranite/ir/mir/lowering.cpp`. Using `subclassof` in code that reaches MIR codegen will fall through to the default case and produce an invalid result.
 
 ---
 
-## Type Kind Enumeration
+## Method Reference
 
-The `Type::Kind` enum at `src/uranite/semantic/typeref.hpp:50-69` includes the `Meta` kind alongside all other type kinds:
+### instanceof Syntax
 
-| Kind | Value | Description |
-|---|---|---|
-| `Meta` | 58 | `Meta<T>` — type treated as a value |
-
-Other related kinds for context:
-
-| Kind | Description |
+| Syntax | Description |
 |---|---|
-| `Class` | Class types — support `instanceof` with inheritance traversal |
-| `Struct` | Struct types — support `instanceof` with direct name match only |
-| `Interface` | Interface types |
-| `Bool` | Result type of `instanceof` and `subclassof` |
+| `value instanceof Type` | Check if value is of the specified type |
+| `value instanceof ParentType` | Check if value's type extends the target |
+| `if value instanceof Type:` | Use instanceof in condition |
+
+### Meta Type Syntax
+
+| Syntax | Description |
+|---|---|
+| `Meta<T>` | A type value wrapping type `T` |
+| `Meta<String> variable = String` | Store a type as a value |
 
 ---
 
 ## Examples
 
-### Meta Type Variables
+### Class Hierarchy Type Checking
 
-```
-package examples
-
-Meta<String> stringType = String
-Meta<I64> integerType = I64
-Meta<Object> objectType = Object
-
-Meta<Object> anyType = String
-```
-
-**Compilation trace**:
-1. **Parser**: `String` in expression position is parsed as an `IdentifierExpression`. During semantic analysis, the identifier is resolved as a type name and wrapped in `TypeReferenceExpression`.
-2. **Semantic analysis**: `TypeReferenceExpression("String")` triggers `lookupType("String")` which resolves the `String` type, then `makeMeta` wraps it into `Meta<String>`. The declared variable type `Meta<String>` matches.
-3. **Auto-wrapping**: For `Meta<Object> anyType = String`, if the initializer resolves as a non-Meta type, the analyzer auto-wraps it via `makeMeta` at `analyzer.cpp:4040-4041` before the assignability check.
-4. **Assignability**: `Meta<String>` is assignable to `Meta<Object>` because `String` is assignable to `Object` (covariant).
-
-### instanceof Checks
-
-```
-package examples
-
+```uranite
 from uranite.io.console import puts
 
-public class Animal:
-    public String name
+class Animal:
 
-    public function Animal(self, String name) -> Void:
-        self.name = name
+    public function Animal( self ) -> Void:
+        pass
 
-public class Dog extends Animal:
-    public function Dog(self, String name) -> Void:
-        super(name)
+class Dog extends Animal:
+
+    public function Dog( self ) -> Void:
+        parent()
 
 public function main() -> I32:
-    Dog rex = new Dog("Rex")
+    Dog dog = new Dog()
+    Animal animal = new Animal()
 
-    if rex instanceof Dog:
-        puts("Rex is a Dog")
+    Boolean dogIsDog = dog instanceof Dog
+    Boolean dogIsAnimal = dog instanceof Animal
+    Boolean animalIsAnimal = animal instanceof Animal
+    Boolean animalIsDog = animal instanceof Dog
 
-    if rex instanceof Animal:
-        puts("Rex is an Animal")
-
+    puts( dogIsDog.toString() )
+    puts( dogIsAnimal.toString() )
+    puts( animalIsAnimal.toString() )
+    puts( animalIsDog.toString() )
     return 0
 ```
 
-**Compilation trace**:
-1. **Parser**: `rex instanceof Dog` parsed as `InstanceofExpression(IdentifierExpression("rex"), SimpleTypeNode("Dog"))`.
-2. **Semantic analysis**: Analyze `rex` (resolves to `Dog` type), resolve `Dog` type node. Result type: `Boolean`.
-3. **HIR**: `HIRInstanceOf(checkedExpression=HIRVariableAccess("rex"), checkedType=Dog)`.
-4. **MIR**: `InstanceOfCheck` instruction with `rex` as source operand and `Dog` as operand type.
-5. **MIR codegen**: Source type `Dog` matches target type `Dog` by name — emit `ConstantInt::getTrue`. For `rex instanceof Animal`, source type `Dog` does not match directly, but inheritance chain traversal finds `Animal` as base class — emit `ConstantInt::getTrue`. Both checks fold to compile-time constants.
-
-### subclassof Checks
+Output:
 
 ```
-package examples
+True
+True
+True
+False
+```
 
-public class Vehicle:
-    pass
+### Primitive Type Verification
 
-public class Car extends Vehicle:
-    pass
+```uranite
+from uranite.io.console import puts
 
 public function main() -> I32:
-    Boolean check = Car subclassof Vehicle
+    String text = "hello"
+    I64 number = 42
+
+    Boolean textIsString = text instanceof String
+    Boolean numberIsI64 = number instanceof I64
+    Boolean textIsI64 = text instanceof I64
+
+    puts( textIsString.toString() )
+    puts( numberIsI64.toString() )
+    puts( textIsI64.toString() )
     return 0
 ```
 
-**Compilation trace**:
-1. **Parser**: `Car subclassof Vehicle` parsed as `SubclassofExpression(SimpleTypeNode("Car"), SimpleTypeNode("Vehicle"))`.
-2. **Semantic analysis**: Both types resolved. Result type: `Boolean`.
-3. **HIR**: `HIRSubclassOf(childType=Car, parentType=Vehicle)`.
-4. **MIR**: Not yet implemented — `SubclassOf` HIR node has no MIR handler. Falls through to default case.
+Output:
 
-### Comparison Between instanceof and subclassof
+```
+True
+True
+False
+```
 
-| Aspect | `instanceof` | `subclassof` |
-|---|---|---|
-| Left operand | Value expression | Type name |
-| Right operand | Type name | Type name |
-| Checks | Value's type against target type | Type inheritance relationship |
-| MIR instruction | `InstanceOfCheck` | Not implemented |
-| Codegen | Compile-time constant folding | Not implemented |
-| Inheritance traversal | Yes (walks `baseClass` chain) | N/A (no codegen) |
-| Generic handling | Strips `<...>` before comparison | N/A |
+### Type Guard Pattern
+
+```uranite
+from uranite.io.console import puts
+
+class Vehicle:
+
+    public function Vehicle( self ) -> Void:
+        pass
+
+class Car extends Vehicle:
+
+    public function Car( self ) -> Void:
+        parent()
+
+class Truck extends Vehicle:
+
+    public function Truck( self ) -> Void:
+        parent()
+
+public function main() -> I32:
+    Car car = new Car()
+    Truck truck = new Truck()
+
+    if car instanceof Vehicle:
+        puts( "car is vehicle" )
+    if truck instanceof Vehicle:
+        puts( "truck is vehicle" )
+    if car instanceof Truck:
+        puts( "should not print" )
+    else:
+        puts( "car is not truck" )
+    return 0
+```
+
+Output:
+
+```
+car is vehicle
+truck is vehicle
+car is not truck
+```
+
+### Multi-Level Inheritance Check
+
+```uranite
+from uranite.io.console import puts
+
+class Base:
+
+    public function Base( self ) -> Void:
+        pass
+
+class Middle extends Base:
+
+    public function Middle( self ) -> Void:
+        parent()
+
+class Bottom extends Middle:
+
+    public function Bottom( self ) -> Void:
+        parent()
+
+public function main() -> I32:
+    Bottom bottom = new Bottom()
+    Boolean bottomIsBottom = bottom instanceof Bottom
+    Boolean bottomIsMiddle = bottom instanceof Middle
+    Boolean bottomIsBase = bottom instanceof Base
+    puts( bottomIsBottom.toString() )
+    puts( bottomIsMiddle.toString() )
+    puts( bottomIsBase.toString() )
+
+    Middle middle = new Middle()
+    Boolean middleIsBottom = middle instanceof Bottom
+    Boolean middleIsMiddle = middle instanceof Middle
+    Boolean middleIsBase = middle instanceof Base
+    puts( middleIsBottom.toString() )
+    puts( middleIsMiddle.toString() )
+    puts( middleIsBase.toString() )
+    return 0
+```
+
+Output:
+
+```
+True
+True
+True
+False
+True
+True
+```

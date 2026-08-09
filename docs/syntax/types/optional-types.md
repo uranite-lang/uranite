@@ -1,737 +1,623 @@
 # Optional Types
 
-Uranite's optional type system provides compile-time nullable safety through the `Optional<T>` wrapper. An optional type, written as `?T`, represents a value that is either a valid `T` or `None` (the null pointer). Optionals are first-class types with dedicated parsing syntax, semantic resolution, assignability rules, comparability rules, automatic unwrapping for member access and method calls, generic substitution support, and control-flow integration via pointer truthiness.
-
-This document covers the complete optional type specification — the `OptionalType` struct, parsing via prefix and suffix `?` syntax, semantic resolution with `makeOptional()`, LLVM representation as an opaque pointer, the assignability hierarchy (None-to-Optional, T-to-Optional, Optional-to-Optional, Optional-to-T), comparability rules, automatic unwrapping in member access and method dispatch, generic parameter substitution, iterator unwrapping in for-in loops, and practical patterns for nullable programming.
-
 ---
 
 ## Table of Contents
 
-- [Type Identity](#type-identity)
-- [The OptionalType Struct](#the-optionaltype-struct)
-  - [Structure](#structure)
-  - [Display Representation](#display-representation)
-  - [Factory Method](#factory-method)
-- [LLVM Representation](#llvm-representation)
-- [Syntax](#syntax)
-  - [Prefix Syntax](#prefix-syntax)
-  - [Suffix Syntax](#suffix-syntax)
-  - [Parsing Implementation](#parsing-implementation)
-- [Compilation Pipeline](#compilation-pipeline)
-  - [Parser Stage](#parser-stage)
-  - [Semantic Resolution](#semantic-resolution)
-  - [HIR and MIR Stages](#hir-and-mir-stages)
-  - [Codegen Stage](#codegen-stage)
-- [Assignability Rules](#assignability-rules)
-  - [None to Optional](#none-to-optional)
-  - [T to Optional](#t-to-optional)
-  - [Optional to Optional](#optional-to-optional)
-  - [Optional to T](#optional-to-t)
-  - [Complete Assignability Table](#complete-assignability-table)
-- [Comparability Rules](#comparability-rules)
-  - [Optional with None](#optional-with-none)
-  - [Optional with Inner Type](#optional-with-inner-type)
-  - [Complete Comparability Table](#complete-comparability-table)
-- [Automatic Unwrapping](#automatic-unwrapping)
-  - [Member Access Unwrapping](#member-access-unwrapping)
-  - [Method Call Unwrapping](#method-call-unwrapping)
-  - [Iterator Unwrapping](#iterator-unwrapping)
-- [Generic Substitution](#generic-substitution)
-  - [Type Parameter Substitution](#type-parameter-substitution)
-  - [Generic Parameter Collection](#generic-parameter-collection)
-- [None Checks](#none-checks)
-  - [Equality Comparison](#equality-comparison)
-  - [Identity with `is`](#identity-with-is)
-  - [Truthiness Coercion](#truthiness-coercion)
-- [Examples](#examples)
-  - [Optional Declarations](#optional-declarations)
-  - [Function Return Types](#function-return-types)
-  - [None Checking Patterns](#none-checking-patterns)
-  - [Optional Parameters](#optional-parameters)
-  - [Practical Usage](#practical-usage)
+- [Optional Types](#optional-types)
+  - [Table of Contents](#table-of-contents)
+  - [Overview](#overview)
+  - [Declaring Optional Variables](#declaring-optional-variables)
+    - [Optional String](#optional-string)
+    - [Optional Integer](#optional-integer)
+    - [Optional Boolean](#optional-boolean)
+    - [Assigning Values to Optionals](#assigning-values-to-optionals)
+  - [None Checks](#none-checks)
+    - [Identity Check with is](#identity-check-with-is)
+    - [Negated Identity with is not](#negated-identity-with-is-not)
+    - [Equality Check with ==](#equality-check-with-)
+    - [Inequality Check with !=](#inequality-check-with-)
+  - [Optional Function Parameters](#optional-function-parameters)
+  - [Optional Return Types](#optional-return-types)
+  - [Unwrapping Optionals](#unwrapping-optionals)
+  - [Optional Fields in Classes](#optional-fields-in-classes)
+  - [Common Patterns](#common-patterns)
+    - [Default Value Pattern](#default-value-pattern)
+    - [First Present Selection](#first-present-selection)
+    - [Presence Check](#presence-check)
+    - [Optional Forwarding](#optional-forwarding)
+  - [Method Reference](#method-reference)
+    - [Declaration Syntax](#declaration-syntax)
+    - [None Check Syntax](#none-check-syntax)
+  - [Examples](#examples)
+    - [User Lookup System](#user-lookup-system)
+    - [Configuration with Defaults](#configuration-with-defaults)
+    - [Optional Class Fields](#optional-class-fields)
+    - [Multi-Optional Decision Logic](#multi-optional-decision-logic)
 
 ---
 
-## Type Identity
+## Overview
 
-| Property | Value |
-|---|---|
-| Kind | `Type::Kind::Optional` |
-| Display Name | `Optional<InnerType>` |
-| Short Form | `?InnerType` |
-| AST Node | `OptionalTypeNode` (kind: `Node::Kind::OptionalType`) |
-| LLVM Type | `ptr` (opaque pointer) |
-| Wraps | Any type `T` |
+An optional type represents a value that may or may not be present. An optional is either a valid value of its inner type or `None`. Optional types are declared with the `?` prefix before the type name.
 
-Optional is a parametric wrapper — it does not exist as a standalone type. `?String`, `?I64`, `?Boolean` are each distinct types with different inner types but the same LLVM representation.
+`?String` means "a String or None". `?I64` means "an I64 or None". Each combination of `?` and a type creates a distinct type in the type system.
+
+Optional types use `is None` and `is not None` for presence checks. Values of type `T` can be assigned directly to `?T` variables, and `None` can be assigned to any optional type.
 
 ---
 
-## The OptionalType Struct
+## Declaring Optional Variables
 
-### Structure
+### Optional String
 
-```
-struct OptionalType : Type {
-    TypeSharedPointer inner;
-
-    OptionalType(TypeSharedPointer inner)
-        : Type(Type::Kind::Optional, fmt::format("Optional<{}>", inner->name))
-        , inner(std::move(inner)) {}
-};
-```
-
-Key fields:
-- `kind`: Always `Type::Kind::Optional`.
-- `name`: Formatted as `Optional<InnerTypeName>` — e.g., `Optional<String>`, `Optional<I64>`.
-- `inner`: Shared pointer to the wrapped type. This is the type the optional can hold when it is not `None`.
-
-`OptionalType` inherits from `Type` and adds the single `inner` field. No additional metadata (nullability flags, default values) is stored.
-
-### Display Representation
-
-The `toString()` method produces the shorthand `?` prefix form:
-
-```
-std::string toString() const override {
-    return "?" + this->inner->toString();
-}
-```
-
-| Full Form | Short Form |
-|---|---|
-| `Optional<String>` | `?String` |
-| `Optional<I64>` | `?I64` |
-| `Optional<Optional<Boolean>>` | `??Boolean` |
-| `Optional<ArrayList<String>>` | `?ArrayList<String>` |
-
-The `name` field uses the full `Optional<T>` form. The `toString()` output uses the `?T` shorthand. Both representations refer to the same type.
-
-### Factory Method
-
-Optional types are created through the type registry factory:
-
-```
-TypeSharedPointer Registry::makeOptional(TypeSharedPointer inner) {
-    return std::make_shared<OptionalType>(std::move(inner));
-}
-```
-
-This is a simple forwarding factory — no caching, deduplication, or validation. Each call creates a fresh `OptionalType` instance. Type identity is checked via structural comparison of the inner types, not pointer identity of the OptionalType instances.
-
----
-
-## LLVM Representation
-
-Optional types map to `llvm::PointerType::getUnqual(context)` — the same opaque pointer used for `String`, `None`, class instances, and other reference types:
-
-```
-case semantic::Type::Kind::Optional:
-    return llvm::PointerType::getUnqual(this->llvmContext)
-```
-
-At the LLVM level, an optional value is a pointer that is either:
-- **Non-null** — points to a valid value (or is the value itself for pointer-sized types).
-- **Null** — represents `None`.
-
-There is no separate "tag" or "discriminator" field. Nullability is determined by pointer value alone. This makes optionals zero-cost at the representation level — `?String` and `String` have identical LLVM types (`ptr`). The distinction exists only in the semantic type system.
-
-| Source Type | LLVM Type | None Representation |
-|---|---|---|
-| `?String` | `ptr` | `null` |
-| `?I64` | `ptr` | `null` |
-| `?Boolean` | `ptr` | `null` |
-| `?ArrayList<T>` | `ptr` | `null` |
-
----
-
-## Syntax
-
-### Prefix Syntax
-
-The `?` prefix before a type name marks it as optional:
+Use `?String` to declare a variable that can hold a `String` or `None`.
 
 ```uranite
 ?String maybeName = "Alice"
-?I64 maybeCount = None
-?Boolean maybeFlag = None
+?String noName = None
 ```
 
-This is the primary syntax for declaring optional types.
+### Optional Integer
 
-### Suffix Syntax
-
-The `?` can also appear as a suffix after a type (including after union types):
+Use `?I64` to declare a variable that can hold an `I64` or `None`.
 
 ```uranite
-String? maybeName = "Alice"
-I64? maybeCount = None
+?I64 maybeCount = 42
+?I64 noCount = None
 ```
 
-Both `?String` and `String?` produce the same `OptionalType` wrapping `String`.
+### Optional Boolean
 
-### Parsing Implementation
+Use `?Boolean` to declare a variable that can hold a `Boolean` or `None`.
 
-The `parseTypeNode()` method handles both prefix and suffix optional syntax:
-
-```
-TypeNodeSharedPointer Parser::parseTypeNode() {
-    if( this->check(token::Type::Question) ) {
-        // Prefix: ?Type
-        prefixSource = this->current().source;
-        this->advance();
-        innerType = this->parseBaseTypeNode();
-        return std::make_shared<OptionalTypeNode>(innerType, prefixSource);
-    }
-
-    baseType = this->parseBaseTypeNode();
-
-    // Union types: Type | Type | ...
-    if( this->check(token::Type::Pipe) ) {
-        // ... parse union ...
-    }
-
-    if( this->check(token::Type::Question) ) {
-        // Suffix: Type?
-        suffixSource = this->current().source;
-        this->advance();
-        return std::make_shared<OptionalTypeNode>(baseType, suffixSource);
-    }
-
-    return baseType;
-}
+```uranite
+?Boolean maybeFlag = True
+?Boolean noFlag = None
 ```
 
-Parsing order:
-1. Check for leading `?` — if present, parse as prefix optional.
-2. Parse base type.
-3. Check for `|` — if present, parse as union type.
-4. Check for trailing `?` — if present, wrap in optional.
+### Assigning Values to Optionals
 
-This means `?String | I64` parses as `Optional<String> | I64` (the `?` binds to `String` only), while `String | I64?` parses as `Optional<String | I64>` (the `?` wraps the entire union).
+A concrete value of type `T` can be assigned directly to a variable of type `?T`. No wrapping is needed.
 
----
-
-## Compilation Pipeline
-
-### Parser Stage
-
-The parser creates an `OptionalTypeNode` AST node:
-
-```
-struct OptionalTypeNode : TypeNode {
-    TypeNodeSharedPointer innerType;
-
-    OptionalTypeNode(TypeNodeSharedPointer innerType, const SourceSharedPointer& source)
-        : TypeNode(Node::Kind::OptionalType, source)
-        , innerType(std::move(innerType)) {}
-};
+```uranite
+?String name = "Alice"
+?I64 count = 100
+?Boolean flag = False
 ```
 
-The `innerType` field holds the AST representation of the wrapped type, which is itself a `TypeNode` — it may be a simple type name, a generic type, an array type, or another optional (for nested optionals like `??String`).
-
-### Semantic Resolution
-
-The semantic analyzer resolves `OptionalTypeNode` to an `OptionalType`:
-
-```
-case ast::Node::Kind::OptionalType: {
-    OptionalTypeNode& optionalNode = static_cast<OptionalTypeNode&>(*typeNode);
-    TypeSharedPointer innerType = this->resolveType(optionalNode.innerType);
-    return innerType
-        ? this->typeRegistry.makeOptional(innerType)
-        : this->typeRegistry.getError();
-}
-```
-
-Resolution proceeds recursively — the inner type is resolved first, then wrapped via `makeOptional()`. If the inner type fails to resolve (returns `nullptr`), an error type is returned instead of creating a malformed optional.
-
-### HIR and MIR Stages
-
-Optional types pass through HIR and MIR transparently. There are no special HIR or MIR node kinds for optional operations. The type information travels as `resolvedType` metadata on expressions and variables. Optional-specific behavior (unwrapping, None comparison) is handled at the semantic level (type checking) and codegen level (pointer null checks), not at the IR level.
-
-In MIR lowering, method calls on optional-typed receivers are unwrapped:
-
-```
-if( receiverType->kind == semantic::Type::Kind::Optional ) {
-    OptionalType* optionalType = static_cast<OptionalType*>(receiverType.get());
-    if( optionalType->inner != nullptr ) {
-        receiverType = optionalType->inner;
-    }
-}
-```
-
-This allows method dispatch to proceed as if the receiver were the inner type.
-
-### Codegen Stage
-
-At the LLVM level, optional values are plain pointers. No special codegen instruction exists for optional wrapping/unwrapping. The optionality is enforced purely through the semantic type system — by the time codegen runs, optional and non-optional values of the same base type produce identical LLVM IR.
-
----
-
-## Assignability Rules
-
-The `isAssignable()` function in the type registry handles optionals through several rules that form a bidirectional compatibility system.
-
-### None to Optional
-
-`None` and `Void` are unconditionally assignable to any optional type:
-
-```
-if( target->kind == Type::Kind::Optional ) {
-    if( source->isVoid() || source->isNone() ) {
-        return true;
-    }
-    ...
-}
-```
-
-This enables the fundamental nullable initialization:
+Assigning `None` sets the optional to the absent state.
 
 ```uranite
 ?String name = None
 ?I64 count = None
 ```
 
-### T to Optional
-
-A value of type `T` is assignable to `Optional<T>` if `T` is assignable to the optional's inner type:
-
-```
-OptionalTypeSharedPointer targetOptionalType = std::static_pointer_cast<OptionalType>(target);
-return this->isAssignable(targetOptionalType->inner, source);
-```
-
-This enables assigning concrete values to optional slots:
-
-```uranite
-?String name = "Alice"
-?I64 count = 42
-```
-
-The check is recursive — if the inner type has its own assignability rules (e.g., integer widening), those rules apply through the optional wrapper.
-
-### Optional to Optional
-
-When both source and target are optional, the inner types are unwrapped and compared:
-
-```
-if( source->kind == Type::Kind::Optional ) {
-    OptionalTypeSharedPointer sourceOptionalType = std::static_pointer_cast<OptionalType>(source);
-    return this->isAssignable(targetOptionalType->inner, sourceOptionalType->inner);
-}
-```
-
-This enables optional-to-optional assignment when the inner types are compatible:
-
-```uranite
-?I64 narrow = 42
-?I64 wide = narrow
-```
-
-### Optional to T
-
-When the source is optional but the target is not, the optional is unwrapped and the inner type is checked against the target:
-
-```
-if( source->kind == Type::Kind::Optional ) {
-    OptionalTypeSharedPointer sourceOptionalType = std::static_pointer_cast<OptionalType>(source);
-    return this->isAssignable(target, sourceOptionalType->inner);
-}
-```
-
-This allows passing optional values where concrete values are expected — with the implicit risk that the optional might be `None` at runtime:
-
-```uranite
-?String maybeName = getName()
-String name = maybeName
-```
-
-### Complete Assignability Table
-
-| Source | Target | Assignable? | Mechanism |
-|---|---|---|---|
-| `None` | `?T` | Yes | `source->isNone()` check |
-| `Void` | `?T` | Yes | `source->isVoid()` check |
-| `T` | `?T` | Yes | Unwrap target, check inner |
-| `?T` | `?T` | Yes | Unwrap both, check inners |
-| `?T` | `T` | Yes | Unwrap source, check inner |
-| `None` | `T` | No | None is not assignable to non-optional types |
-| `?T` | `?U` | Depends | Unwrap both, check `isAssignable(U, T)` |
-| `T` | `?U` | Depends | Unwrap target, check `isAssignable(U, T)` |
-
----
-
-## Comparability Rules
-
-### Optional with None
-
-Optional types are always comparable with `None` and `Void`:
-
-```
-if( x->kind == Type::Kind::Optional && ( y->isVoid() || y->isNone() ) ) {
-    return true;
-}
-if( y->kind == Type::Kind::Optional && ( x->isVoid() || x->isNone() ) ) {
-    return true;
-}
-```
-
-This enables the fundamental None check:
-
-```uranite
-?String name = getValue()
-if name == None:
-    puts( "No value" )
-```
-
-### Optional with Inner Type
-
-When one operand is optional, the comparability check unwraps it and compares the inner type:
-
-```
-if( x->kind == Type::Kind::Optional ) {
-    OptionalTypeSharedPointer optionalType = std::static_pointer_cast<OptionalType>(x);
-    return this->isComparable(optionalType->inner, y);
-}
-if( y->kind == Type::Kind::Optional ) {
-    OptionalTypeSharedPointer optionalType = std::static_pointer_cast<OptionalType>(y);
-    return this->isComparable(x, optionalType->inner);
-}
-```
-
-This allows comparing optional values with concrete values of the same type:
-
-```uranite
-?I64 maybeCount = 42
-if maybeCount == 42:
-    puts( "Found" )
-```
-
-### Complete Comparability Table
-
-| Left | Right | Comparable? | Mechanism |
-|---|---|---|---|
-| `?T` | `None` | Yes | Direct None check |
-| `?T` | `Void` | Yes | Direct Void check |
-| `None` | `?T` | Yes | Symmetric None check |
-| `?T` | `T` | Yes | Unwrap left, compare inner |
-| `T` | `?T` | Yes | Unwrap right, compare inner |
-| `?T` | `?T` | Yes | Identity match via `equals()` |
-| `?T` | `?U` | Depends | Unwrap, check inner comparability |
-
----
-
-## Automatic Unwrapping
-
-The semantic analyzer and MIR lowering automatically unwrap optional types in several contexts, allowing optional values to be used directly without explicit null checks in member access, method dispatch, and iterator consumption.
-
-### Member Access Unwrapping
-
-When accessing a member on an optional-typed value, the semantic analyzer unwraps the optional and resolves the member against the inner type:
-
-```
-if( objectType->kind == Type::Kind::Optional ) {
-    OptionalTypeSharedPointer optionalType = std::static_pointer_cast<OptionalType>(objectType);
-    if( optionalType->inner ) {
-        if( optionalType->inner->kind == Type::Kind::Class ) {
-            ClassTypeSharedPointer classType = std::static_pointer_cast<ClassType>(optionalType->inner);
-            FieldInfo* fieldInformation = classType->findField(expression.member);
-            if( fieldInformation ) {
-                return fieldInformation->type;
-            }
-            MethodInfo* methodInformation = classType->findMethod(expression.member);
-            if( methodInformation && methodInformation->isProperty ) {
-                FunctionTypeSharedPointer functionType = std::dynamic_pointer_cast<FunctionType>(methodInformation->type);
-                if( functionType ) {
-                    return functionType->returnType;
-                }
-            }
-        }
-        else if( optionalType->inner->kind == Type::Kind::Struct ) {
-            StructTypeSharedPointer structType = std::static_pointer_cast<StructType>(optionalType->inner);
-            FieldInfo* fieldInformation = structType->findField(expression.member);
-            if( fieldInformation ) {
-                return fieldInformation->type;
-            }
-        }
-    }
-}
-```
-
-This handles both class fields and struct fields. Property-style methods (methods marked `isProperty`) are also resolved through the optional wrapper.
-
-### Method Call Unwrapping
-
-In MIR lowering, method calls on optional-typed receivers unwrap the optional to determine the owner class name for dispatch:
-
-```
-if( receiverType->kind == semantic::Type::Kind::Optional ) {
-    semantic::OptionalType* optionalType = static_cast<semantic::OptionalType*>(receiverType.get());
-    if( optionalType->inner != nullptr ) {
-        receiverType = optionalType->inner;
-    }
-}
-ownerClassName = receiverType->name;
-```
-
-This allows calling methods on optional values without explicit unwrapping:
-
-```uranite
-?String name = "Alice"
-I64 length = name.length()
-```
-
-The method is dispatched as if `name` were a `String`. If `name` is `None` at runtime, the behavior is a null pointer dereference — the type system permits it but runtime safety is the developer's responsibility.
-
-### Iterator Unwrapping
-
-When a for-in loop iterates over a collection whose `next()` method returns an optional (the standard iterator protocol — `next()` returns `?T`, yielding `None` to signal exhaustion), the semantic analyzer unwraps the optional to determine the loop variable type:
-
-```
-TypeSharedPointer nextReturnType = hasIteratorInterface(iterableType);
-if( nextReturnType ) {
-    if( nextReturnType->kind == Type::Kind::Optional ) {
-        variableType = std::static_pointer_cast<OptionalType>(nextReturnType)->inner;
-    }
-    else {
-        variableType = nextReturnType;
-    }
-}
-```
-
-This means `for String item in collection:` works even when the iterator's `next()` returns `?String` — the optional is stripped, and the loop variable is typed as `String`.
-
----
-
-## Generic Substitution
-
-### Type Parameter Substitution
-
-When substituting concrete types for generic parameters, optional types are preserved through the substitution:
-
-```
-if( type->kind == Type::Kind::Optional ) {
-    TypeSharedPointer inner = this->substituteGenericParameters(
-        std::static_pointer_cast<OptionalType>(type)->inner, substitutionMap
-    );
-    return this->typeRegistry.makeOptional(inner);
-}
-```
-
-Given `?T` where `T` is mapped to `String` in the substitution map, the result is `?String`. The optional wrapper is reconstructed around the substituted inner type.
-
-The same pattern applies in the `substituteType` helper used for method return type monomorphization:
-
-```
-if( targetType->kind == Type::Kind::Optional ) {
-    return this->typeRegistry.makeOptional(
-        substituteType(std::static_pointer_cast<OptionalType>(targetType)->inner, substitutionMap)
-    );
-}
-```
-
-### Generic Parameter Collection
-
-When collecting generic parameter names from type annotations (for scope analysis), optionals are recursively descended:
-
-```
-case ast::Node::Kind::OptionalType: {
-    OptionalTypeNode& optionalNode = static_cast<OptionalTypeNode&>(*typeNode);
-    collectGenericParamNamesFromType(optionalNode.innerType, typeRegistry, results);
-    break;
-}
-```
-
-This ensures that `?T` correctly registers `T` as a generic parameter that needs resolution.
-
 ---
 
 ## None Checks
 
-Three mechanisms exist for checking whether an optional value is `None`.
+### Identity Check with is
 
-### Equality Comparison
-
-The `==` and `!=` operators can compare any value with `None`:
+The `is` keyword checks whether an optional value is `None`.
 
 ```uranite
-?String name = getValue()
-if name == None:
-    puts( "absent" )
-if name != None:
-    puts( name )
+from uranite.io.console import puts
+
+public function main() -> I32:
+    ?String name = None
+    if name is None:
+        puts( "absent" )
+    return 0
 ```
 
-The semantic analyzer has a special bypass that permits None comparisons regardless of type:
+Output:
 
 ```
-bool isNoneComparison = rightSideType->isNone() || leftSideType->isNone();
-if( isEqualityOp && isNoneComparison ) {
-    return this->typeRegistry.getBool();
-}
+absent
 ```
 
-At the LLVM level, `value == None` compiles to `ICmpEQ(value, ConstantPointerNull)`.
+### Negated Identity with is not
 
-### Identity with `is`
-
-The `is` keyword performs identity (pointer equality) comparison:
+Use `is not None` to check that an optional has a value.
 
 ```uranite
-if name is None:
-    puts( "absent" )
-if name is not None:
-    puts( name )
+from uranite.io.console import puts
+
+public function main() -> I32:
+    ?String name = "Alice"
+    if name is not None:
+        puts( name )
+    return 0
 ```
 
-`is` lowers to `CompareEqual` in MIR — identical to `==` at the instruction level. The distinction is semantic: `is` tests identity (same pointer), `==` tests equality (same content). For None checks, both produce the same result since None is always the null pointer.
+Output:
 
-`is not` is parsed as `is` followed by `not`, producing a `UnaryExpression(KeywordNot, BinaryExpression(KeywordIs, left, right))`.
+```
+Alice
+```
 
-### Truthiness Coercion
+### Equality Check with ==
 
-Optional values (being pointers) participate in truthiness coercion in conditional contexts:
+The `==` operator can compare an optional with `None`.
 
 ```uranite
-?String name = getValue()
-if name:
-    puts( name )
+from uranite.io.console import puts
+
+public function main() -> I32:
+    ?String name = "hello"
+    if name == None:
+        puts( "none" )
+    else:
+        puts( "not none" )
+    return 0
 ```
 
-The `generateBranchConditional()` function coerces pointer values:
+Output:
 
 ```
-if( conditionValue->getType()->isPointerTy() ) {
-    conditionValue = ICmpNE(conditionValue, ConstantPointerNull, "cond.bool")
-}
+not none
 ```
 
-Non-null pointer (has value) is truthy. Null pointer (None) is falsy. This provides the most concise None check syntax.
+### Inequality Check with !=
 
-| Check Style | Syntax | Equivalent LLVM |
-|---|---|---|
-| Equality | `value == None` | `ICmpEQ(value, null)` |
-| Identity | `value is None` | `ICmpEQ(value, null)` |
-| Truthiness | `if value:` | `ICmpNE(value, null)` |
-| Negated equality | `value != None` | `ICmpNE(value, null)` |
-| Negated identity | `value is not None` | `not ICmpEQ(value, null)` |
+The `!=` operator checks that an optional is not `None`.
+
+```uranite
+from uranite.io.console import puts
+
+public function main() -> I32:
+    ?String name = "hello"
+    if name != None:
+        puts( "has value" )
+    return 0
+```
+
+Output:
+
+```
+has value
+```
+
+---
+
+## Optional Function Parameters
+
+Functions can accept optional parameters, allowing callers to pass either a value or `None`.
+
+```uranite
+from uranite.io.console import puts
+
+public function greet( String name, ?String title ) -> Void:
+    if title is not None:
+        puts( title )
+        puts( name )
+    else:
+        puts( name )
+
+public function main() -> I32:
+    greet( "Alice", "Dr." )
+    greet( "Bob", None )
+    return 0
+```
+
+Output:
+
+```
+Dr.
+Alice
+Bob
+```
+
+When `title` is not `None`, both the title and name are printed. When `title` is `None`, only the name is printed.
+
+---
+
+## Optional Return Types
+
+Functions can return `?T` to indicate they may or may not produce a value.
+
+```uranite
+from uranite.io.console import puts
+
+public function findUser( String name ) -> ?String:
+    if name == "admin":
+        return "Administrator"
+    return None
+
+public function main() -> I32:
+    ?String found = findUser( "admin" )
+    ?String missing = findUser( "guest" )
+    if found is not None:
+        puts( found )
+    if missing is None:
+        puts( "not found" )
+    return 0
+```
+
+Output:
+
+```
+Administrator
+not found
+```
+
+The function returns a `String` value for known users and `None` for unknown users. The caller checks the result before using it.
+
+---
+
+## Unwrapping Optionals
+
+An optional value can be assigned to a non-optional variable of the same type. This implicitly unwraps the optional.
+
+```uranite
+from uranite.io.console import puts
+
+public function main() -> I32:
+    ?I64 maybeValue = 42
+    I64 concrete = maybeValue
+    puts( concrete.toString() )
+    return 0
+```
+
+Output:
+
+```
+42
+```
+
+If the optional is `None` at runtime when unwrapped this way, the behavior is undefined. Always check for `None` before unwrapping.
+
+```uranite
+from uranite.io.console import puts
+
+public function safeUnwrap( ?I64 value ) -> I64:
+    if value is None:
+        return 0
+    I64 unwrapped = value
+    return unwrapped
+
+public function main() -> I32:
+    puts( safeUnwrap( 42 ).toString() )
+    puts( safeUnwrap( None ).toString() )
+    return 0
+```
+
+Output:
+
+```
+42
+0
+```
+
+---
+
+## Optional Fields in Classes
+
+Class fields can be declared as optional types, allowing objects to have nullable properties.
+
+```uranite
+from uranite.io.console import puts
+
+class UserProfile:
+
+    public String name
+    public ?String email
+
+    public function UserProfile( self, String name, ?String email ) -> Void:
+        self.name = name
+        self.email = email
+
+    public function hasEmail( self ) -> Boolean:
+        if self.email is not None:
+            return True
+        return False
+
+public function main() -> I32:
+    UserProfile withEmail = new UserProfile( "Alice", "alice@example.com" )
+    UserProfile noEmail = new UserProfile( "Bob", None )
+    puts( withEmail.name )
+    if withEmail.hasEmail() == True:
+        puts( withEmail.email )
+    puts( noEmail.name )
+    if noEmail.hasEmail() == False:
+        puts( "no email" )
+    return 0
+```
+
+Output:
+
+```
+Alice
+alice@example.com
+Bob
+no email
+```
+
+---
+
+## Common Patterns
+
+### Default Value Pattern
+
+Return a fallback value when an optional is `None`.
+
+```uranite
+from uranite.io.console import puts
+
+public function withDefault( ?String value, String fallback ) -> String:
+    if value is not None:
+        return value
+    return fallback
+
+public function main() -> I32:
+    puts( withDefault( "present", "default" ) )
+    puts( withDefault( None, "default" ) )
+    return 0
+```
+
+Output:
+
+```
+present
+default
+```
+
+### First Present Selection
+
+Return the first non-None value from a series of optionals.
+
+```uranite
+from uranite.io.console import puts
+
+public function firstPresent( ?String alpha, ?String beta ) -> ?String:
+    if alpha is not None:
+        return alpha
+    if beta is not None:
+        return beta
+    return None
+
+public function main() -> I32:
+    ?String result = firstPresent( None, "backup" )
+    if result is not None:
+        puts( result )
+    ?String noResult = firstPresent( None, None )
+    if noResult is None:
+        puts( "all None" )
+    return 0
+```
+
+Output:
+
+```
+backup
+all None
+```
+
+### Presence Check
+
+Check whether multiple optional values are all present or all absent.
+
+```uranite
+from uranite.io.console import puts
+
+public function allPresent( ?String first, ?String second ) -> Boolean:
+    if first is None:
+        return False
+    if second is None:
+        return False
+    return True
+
+public function main() -> I32:
+    Boolean both = allPresent( "a", "b" )
+    Boolean oneMissing = allPresent( "a", None )
+    Boolean noneMissing = allPresent( None, None )
+    puts( both.toString() )
+    puts( oneMissing.toString() )
+    puts( noneMissing.toString() )
+    return 0
+```
+
+Output:
+
+```
+True
+False
+False
+```
+
+### Optional Forwarding
+
+Pass optional values through multiple function layers.
+
+```uranite
+from uranite.io.console import puts
+
+public function processName( ?String name ) -> String:
+    if name is None:
+        return "anonymous"
+    return name
+
+public function formatGreeting( ?String name ) -> String:
+    String resolved = processName( name )
+    return resolved
+
+public function main() -> I32:
+    puts( formatGreeting( "Alice" ) )
+    puts( formatGreeting( None ) )
+    return 0
+```
+
+Output:
+
+```
+Alice
+anonymous
+```
+
+---
+
+## Method Reference
+
+### Declaration Syntax
+
+| Syntax | Description |
+|---|---|
+| `?String name` | Optional String variable |
+| `?I64 count` | Optional integer variable |
+| `?Boolean flag` | Optional Boolean variable |
+| `?String name = "value"` | Optional initialized with a value |
+| `?String name = None` | Optional initialized as absent |
+| `function name() -> ?T:` | Function returning an optional |
+| `function name( ?T param ) -> Void:` | Function accepting an optional parameter |
+
+### None Check Syntax
+
+| Syntax | Description |
+|---|---|
+| `value is None` | True when the optional is absent |
+| `value is not None` | True when the optional has a value |
+| `value == None` | Equality check against None |
+| `value != None` | Inequality check against None |
 
 ---
 
 ## Examples
 
-### Optional Declarations
-
-```uranite
-?String maybeName = "Alice"
-?String noName = None
-
-?I64 maybeCount = 42
-?I64 noCount = None
-
-?Boolean maybeFlag = True
-?Boolean noFlag = None
-```
-
-### Function Return Types
+### User Lookup System
 
 ```uranite
 from uranite.io.console import puts
 
-public function findByName( String target ) -> ?String:
-    if target == "admin":
+public function findUser( String name ) -> ?String:
+    if name == "admin":
         return "Administrator"
-    if target == "root":
+    if name == "root":
         return "Superuser"
     return None
 
-public function parseInt( String text ) -> ?I64:
-    if text == "0":
-        return 0
-    if text == "1":
-        return 1
-    return None
-
-public function main() -> I32:
-    ?String admin = findByName( "admin" )
-    ?String unknown = findByName( "guest" )
-
-    if admin is not None:
-        puts( admin )
-
-    if unknown is None:
-        puts( "User not found" )
-
-    return 0
-```
-
-### None Checking Patterns
-
-```uranite
-from uranite.io.console import puts
-
-public function checkEquality( ?String value ) -> Void:
-    if value == None:
-        puts( "None via ==" )
-
-public function checkIdentity( ?String value ) -> Void:
-    if value is None:
-        puts( "None via is" )
-
-public function checkTruthiness( ?String value ) -> Void:
-    if value:
-        puts( "Has value" )
+public function describeUser( String name ) -> Void:
+    ?String role = findUser( name )
+    if role is not None:
+        puts( name )
+        puts( role )
     else:
-        puts( "None via truthiness" )
-
-public function checkNegatedIdentity( ?String value ) -> Void:
-    if value is not None:
-        puts( "Not None" )
+        puts( name )
+        puts( "unknown" )
 
 public function main() -> I32:
-    ?String present = "hello"
-    ?String absent = None
-
-    checkEquality( absent )
-    checkIdentity( absent )
-    checkTruthiness( present )
-    checkTruthiness( absent )
-    checkNegatedIdentity( present )
-
+    describeUser( "admin" )
+    describeUser( "root" )
+    describeUser( "guest" )
     return 0
 ```
 
-### Optional Parameters
+Output:
+
+```
+admin
+Administrator
+root
+Superuser
+guest
+unknown
+```
+
+### Configuration with Defaults
 
 ```uranite
 from uranite.io.console import puts
 
-public function greet( String name, ?String title ) -> String:
-    if title is not None:
-        return title + " " + name
-    return name
+public function resolveHost( ?String host ) -> String:
+    if host is not None:
+        return host
+    return "localhost"
 
-public function connect( String host, ?I64 port ) -> String:
+public function resolvePort( ?I64 port ) -> I64:
     if port is not None:
-        return host + ":8080"
-    return host + ":80"
+        I64 resolved = port
+        return resolved
+    return 8080
 
 public function main() -> I32:
-    puts( greet( "Alice", "Dr." ) )
-    puts( greet( "Bob", None ) )
-
-    puts( connect( "localhost", 8080 ) )
-    puts( connect( "localhost", None ) )
-
+    String host1 = resolveHost( "example.com" )
+    String host2 = resolveHost( None )
+    I64 port1 = resolvePort( 3000 )
+    I64 port2 = resolvePort( None )
+    puts( host1 )
+    puts( host2 )
+    puts( port1.toString() )
+    puts( port2.toString() )
     return 0
 ```
 
-### Practical Usage
+Output:
+
+```
+example.com
+localhost
+3000
+8080
+```
+
+### Optional Class Fields
 
 ```uranite
 from uranite.io.console import puts
+
+class Contact:
+
+    public String name
+    public ?String phone
+    public ?String email
+
+    public function Contact( self, String name, ?String phone, ?String email ) -> Void:
+        self.name = name
+        self.phone = phone
+        self.email = email
+
+    public function contactMethodCount( self ) -> I64:
+        I64 count = 0
+        if self.phone is not None:
+            count = count + 1
+        if self.email is not None:
+            count = count + 1
+        return count
+
+public function main() -> I32:
+    Contact full = new Contact( "Alice", "555-1234", "alice@example.com" )
+    Contact partial = new Contact( "Bob", "555-5678", None )
+    Contact minimal = new Contact( "Charlie", None, None )
+    puts( full.contactMethodCount().toString() )
+    puts( partial.contactMethodCount().toString() )
+    puts( minimal.contactMethodCount().toString() )
+    return 0
+```
+
+Output:
+
+```
+2
+1
+0
+```
+
+### Multi-Optional Decision Logic
+
+```uranite
+from uranite.io.console import puts
+
+public function allPresent( ?String first, ?String second ) -> Boolean:
+    if first is None:
+        return False
+    if second is None:
+        return False
+    return True
+
+public function withDefault( ?String value, String fallback ) -> String:
+    if value is not None:
+        return value
+    return fallback
 
 public function firstPresent( ?String alpha, ?String beta, ?String gamma ) -> ?String:
     if alpha is not None:
@@ -742,49 +628,25 @@ public function firstPresent( ?String alpha, ?String beta, ?String gamma ) -> ?S
         return gamma
     return None
 
-public function withDefault( ?String value, String fallback ) -> String:
-    if value:
-        return value
-    return fallback
-
-public function mapOptional( ?I64 value, I64 offset ) -> ?I64:
-    if value is None:
-        return None
-    return value + offset
-
-public function allPresent( ?String first, ?String second ) -> Boolean:
-    return first is not None and second is not None
-
-public function nonePresent( ?String first, ?String second ) -> Boolean:
-    return first is None and second is None
-
-public function formatEntry( String key, ?String value ) -> String:
-    if value is None:
-        return key + " = <none>"
-    return key + " = " + value
-
 public function main() -> I32:
-    ?String result = firstPresent( None, "backup", "fallback" )
-    puts( withDefault( result, "default" ) )
+    ?String result = firstPresent( None, None, "fallback" )
+    puts( withDefault( result, "none" ) )
 
-    puts( formatEntry( "name", "Alice" ) )
-    puts( formatEntry( "email", None ) )
-
-    ?I64 base = 10
-    ?I64 shifted = mapOptional( base, 5 )
-    ?I64 noShift = mapOptional( None, 5 )
-
-    if shifted is not None:
-        puts( "Shifted value exists" )
-    if noShift is None:
-        puts( "No shift possible" )
+    ?String noResult = firstPresent( None, None, None )
+    puts( withDefault( noResult, "none" ) )
 
     Boolean both = allPresent( "a", "b" )
-    Boolean neither = nonePresent( None, None )
+    Boolean missing = allPresent( "a", None )
     puts( both.toString() )
-    puts( neither.toString() )
-
+    puts( missing.toString() )
     return 0
 ```
 
-This example demonstrates first-present selection across multiple optionals, default value substitution via truthiness, optional mapping (applying a transformation only when a value exists), multi-optional presence checks with short-circuit `and`, formatted output with None fallback text, and the zero-overhead nature of optional checks — all compiled to `ICmpEQ`/`ICmpNE` against null pointer constants with no boxing, tagging, or wrapper allocation.
+Output:
+
+```
+fallback
+none
+True
+False
+```
