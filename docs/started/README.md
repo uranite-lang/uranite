@@ -426,7 +426,7 @@ This returns exit code `0` if all files are already formatted, and `1` if any fi
 This section has covered installation, building, and your first program. Explore deeper topics through the rest of the documentation:
 
 - **[Language Syntax](../syntax/README.md)** — Complete language reference: types, control flow, generics, pattern matching, async, ownership, and memory management.
-- **[Standard Library Guide](../stdlib-guide/README.md)** — Practical guides for collections, I/O, strings, concurrency, memory, testing, and error handling.
+- **[Standard Library Guide](../stdlib/README.md)** — Practical guides for collections, I/O, strings, concurrency, memory, testing, and error handling.
 - **[Toolchains](../toolchains/README.md)** — Full flag references and usage guides for the compiler, formatter, package manager, and documentation generator.
 - **[Compiler Internals](../internals/README.md)** — Contributor guide for developers working on the compiler itself.
 
