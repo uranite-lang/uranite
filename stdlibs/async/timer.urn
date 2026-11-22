@@ -3,14 +3,12 @@ package uranite.async.timer
 from uranite.async.errors import AsyncRuntimeError
 from uranite.io.syscall import memoryToPtr, sysClose, sysRead, writeI64At
 from uranite.memory.memory import Memory
+from uranite.os.arch.native.syscall import {
+    SYS_TIMERFD_CREATE,
+    SYS_TIMERFD_SETTIME
+}
 from uranite.os.syscall.invoke import syscall2, syscall4
 from uranite.os.syscall.result import SyscallResult
-
-const I64 SYS_TIMERFD_CREATE = 283
-""" Syscall number for timerfd_create on x86-64 Linux. """
-
-const I64 SYS_TIMERFD_SETTIME = 286
-""" Syscall number for timerfd_settime on x86-64 Linux. """
 
 const I64 CLOCK_MONOTONIC = 1
 """ Clock source for monotonic time, unaffected by system clock adjustments. """
