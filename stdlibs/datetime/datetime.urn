@@ -36,12 +36,13 @@ from uranite.io.syscall import {
 }
 from uranite.memory.allocator import alloc
 from uranite.memory.memory import Memory
+from uranite.os.arch.native.syscall import {
+    SYS_CLOCK_GETTIME
+}
 from uranite.os.syscall.invoke import syscall2
 from uranite.os.syscall.result import SyscallResult
 from uranite.string.format import appendTo, padZero
 
-const I64 SYS_CLOCK_GETTIME = 228
-""" Linux syscall number for clock_gettime. """
 const I64 CLOCK_REALTIME = 0
 """ Clock ID for wall-clock time (affected by NTP adjustments). """
 const I64 CLOCK_MONOTONIC = 1
