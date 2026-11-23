@@ -25,7 +25,7 @@ package uranite.os.arch.x86-64.syscall
 
 from uranite.os.syscall.result import SyscallResult
 
-# --- Raw syscall invocation: number in RAX, args in RDI/RSI/RDX/R10/R8/R9 ---
+# Raw syscall invocation: number in RAX, args in RDI/RSI/RDX/R10/R8/R9
 
 public function syscall0( I64 number ) -> SyscallResult:
     I64 result = 0
@@ -62,7 +62,7 @@ public function syscall6( I64 number, I64 arg1, I64 arg2, I64 arg3, I64 arg4, I6
     asm "syscall" : output( "={rax}" result ) : input( "{rax}" number, "{rdi}" arg1, "{rsi}" arg2, "{rdx}" arg3, "{r10}" arg4, "{r8}" arg5, "{r9}" arg6 ) : clobber( "rcx", "r11", "memory" )
     return new SyscallResult( result )
 
-# --- Arity-stable syscall numbers (shared wrapper shape across architectures) ---
+# Arity-stable syscall numbers (shared wrapper shape across architectures)
 
 const I64 SYS_READ = 0
 const I64 SYS_WRITE = 1
@@ -83,7 +83,55 @@ const I64 SYS_FLOCK = 73
 const I64 SYS_IOCTL = 16
 const I64 SYS_PIPE2 = 293
 
-# --- Legacy syscall numbers (still present on x86-64) ---
+# Time and socket syscall numbers (x86-64)
+
+const I64 SYS_CLOCK_GETTIME = 228
+const I64 SYS_SOCKET = 41
+const I64 SYS_CONNECT = 42
+const I64 SYS_ACCEPT = 43
+const I64 SYS_ACCEPT4 = 288
+const I64 SYS_SENDTO = 44
+const I64 SYS_RECVFROM = 45
+const I64 SYS_SENDMSG = 46
+const I64 SYS_RECVMSG = 47
+const I64 SYS_BIND = 49
+const I64 SYS_LISTEN = 50
+const I64 SYS_SETSOCKOPT = 54
+const I64 SYS_GETSOCKOPT = 55
+const I64 SYS_GETSOCKNAME = 51
+const I64 SYS_GETPEERNAME = 52
+const I64 SYS_SHUTDOWN = 48
+const I64 SYS_SOCKETPAIR = 53
+
+# Additional syscall numbers
+
+const I64 SYS_NANOSLEEP = 35
+const I64 SYS_GETPID = 39
+const I64 SYS_GETPPID = 110
+const I64 SYS_GETUID = 102
+const I64 SYS_GETGID = 104
+const I64 SYS_GETEUID = 107
+const I64 SYS_GETEGID = 108
+const I64 SYS_FORK = 57
+const I64 SYS_KILL = 62
+const I64 SYS_WAIT4 = 61
+const I64 SYS_GETPGID = 121
+const I64 SYS_SETSID = 112
+const I64 SYS_EXECVE = 59
+const I64 SYS_EXIT_GROUP = 231
+const I64 SYS_DUP2 = 33
+const I64 SYS_RT_SIGACTION = 13
+const I64 SYS_TIMERFD_CREATE = 283
+const I64 SYS_TIMERFD_SETTIME = 286
+
+# Epoll syscall numbers (x86-64)
+
+const I64 SYS_EPOLL_CREATE1 = 291
+const I64 SYS_EPOLL_CTL = 233
+const I64 SYS_EPOLL_WAIT = 232
+const I64 SYS_EPOLL_PWAIT = 281
+
+# Legacy syscall numbers (still present on x86-64)
 
 const I64 SYS_OPEN = 2
 const I64 SYS_STAT = 4
@@ -99,7 +147,7 @@ const I64 SYS_CHMOD = 90
 const I64 SYS_CHOWN = 92
 const I64 SYS_RENAME = 82
 
-# --- Operation wrappers for calls whose signature differs on aarch64 ---
+# Operation wrappers for calls whose signature differs on aarch64
 
 public function scOpen( I64 pathPtr, I64 flags, I64 mode ) -> SyscallResult:
     return syscall3( SYS_OPEN, pathPtr, flags, mode )
@@ -140,6 +188,21 @@ public function scChmod( I64 pathPtr, I64 mode ) -> SyscallResult:
 public function scChown( I64 pathPtr, I64 uid, I64 gid ) -> SyscallResult:
     return syscall3( SYS_CHOWN, pathPtr, uid, gid )
 
+public function scFork() -> SyscallResult:
+    return syscall0( SYS_FORK )
+
+public function scDup2( I64 oldFd, I64 newFd ) -> SyscallResult:
+    return syscall2( SYS_DUP2, oldFd, newFd )
+
+public function scEpollCreate1() -> SyscallResult:
+    return syscall1( SYS_EPOLL_CREATE1, 0 )
+
+public function scEpollCtl( I64 epfd, I64 operation, I64 fd, I64 eventPtr ) -> SyscallResult:
+    return syscall4( SYS_EPOLL_CTL, epfd, operation, fd, eventPtr )
+
+public function scEpollWait( I64 epfd, I64 eventsPtr, I64 maxEvents, I64 timeoutMs ) -> SyscallResult:
+    return syscall4( SYS_EPOLL_WAIT, epfd, eventsPtr, maxEvents, timeoutMs )
+
 export {
     SYS_ACCESS,
     SYS_CHDIR,
@@ -172,9 +235,53 @@ export {
     SYS_SYMLINK,
     SYS_UNLINK,
     SYS_WRITE,
+    SYS_CLOCK_GETTIME,
+    SYS_EPOLL_CREATE1,
+    SYS_EPOLL_CTL,
+    SYS_EPOLL_WAIT,
+    SYS_EPOLL_PWAIT,
+    SYS_NANOSLEEP,
+    SYS_GETPID,
+    SYS_RT_SIGACTION,
+    SYS_TIMERFD_CREATE,
+    SYS_TIMERFD_SETTIME,
+    SYS_DUP2,
+    SYS_EXECVE,
+    SYS_EXIT_GROUP,
+    SYS_FORK,
+    SYS_GETEGID,
+    SYS_GETEUID,
+    SYS_GETGID,
+    SYS_GETPGID,
+    SYS_GETPPID,
+    SYS_GETUID,
+    SYS_KILL,
+    SYS_SETSID,
+    SYS_WAIT4,
+    SYS_SOCKET,
+    SYS_CONNECT,
+    SYS_ACCEPT,
+    SYS_ACCEPT4,
+    SYS_SENDTO,
+    SYS_RECVFROM,
+    SYS_SENDMSG,
+    SYS_RECVMSG,
+    SYS_BIND,
+    SYS_LISTEN,
+    SYS_SETSOCKOPT,
+    SYS_GETSOCKOPT,
+    SYS_GETSOCKNAME,
+    SYS_GETPEERNAME,
+    SYS_SHUTDOWN,
+    SYS_SOCKETPAIR,
     scAccess,
     scChmod,
     scChown,
+    scDup2,
+    scEpollCreate1,
+    scFork,
+    scEpollCtl,
+    scEpollWait,
     scLink,
     scLstat,
     scMkdir,

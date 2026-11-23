@@ -33,6 +33,13 @@ namespace uranite::diagnostic {
 		warningMaximum( warningMaximum ) {
 	}
 	
+	void Engine::clear() {
+		this->vdiagnostics.clear();
+		this->errorCounts = 0;
+		this->warningCounts = 0;
+		this->sourceLines = nullptr;
+	}
+	
 	void Engine::emit( Level level, const lookup::SourceSharedPointer& source, const std::string& messages, const std::string& hinting ) {
 		this->vdiagnostics.emplace_back( level, source, messages, hinting );
 		switch( level ) {

@@ -115,6 +115,16 @@ namespace uranite::semantic {
 				this->completionPosition = source;
 			}
 			
+			/** @brief Clears gathered completion items. */
+			void clearCompletions() {
+				this->completionItems.clear();
+			}
+			
+			/** @brief Clears the completion trigger position. */
+			void clearCompletionPosition() {
+				this->completionPosition = nullptr;
+			}
+			
 			void importModuleTypes( const std::unordered_map<std::string, TypeSharedPointer>& types );
 			void importModuleSymbols( const std::unordered_map<std::string, std::vector<SymbolSharedPointer>>& symbols );
 			void setUserImportScope( const std::string& sourceFile, const std::unordered_set<std::string>& importedIdentifiers );

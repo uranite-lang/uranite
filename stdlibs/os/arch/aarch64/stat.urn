@@ -1,0 +1,43 @@
+#
+# aarch64 (asm-generic) Linux struct stat layout constants.
+#
+
+package uranite.os.arch.aarch64.stat
+
+const I64 STAT_ARCH = 1
+"""Architecture tag: 0 = x86-64, 1 = aarch64."""
+
+const I64 STAT_SIZE = 128
+"""Size in bytes of struct stat on aarch64 (asm-generic)."""
+
+const I64 ST_DEV_OFFSET = 0
+const I64 ST_INO_OFFSET = 8
+const I64 ST_MODE_OFFSET = 16
+const I64 ST_NLINK_OFFSET = 20
+const I64 ST_UID_OFFSET = 24
+const I64 ST_GID_OFFSET = 28
+const I64 ST_RDEV_OFFSET = 32
+const I64 ST_SIZE_OFFSET = 48
+const I64 ST_BLKSIZE_OFFSET = 56
+const I64 ST_BLOCKS_OFFSET = 64
+const I64 ST_ATIME_OFFSET = 72
+const I64 ST_MTIME_OFFSET = 88
+const I64 ST_CTIME_OFFSET = 104
+
+export {
+    STAT_ARCH,
+    STAT_SIZE,
+    ST_DEV_OFFSET,
+    ST_INO_OFFSET,
+    ST_NLINK_OFFSET,
+    ST_MODE_OFFSET,
+    ST_UID_OFFSET,
+    ST_GID_OFFSET,
+    ST_RDEV_OFFSET,
+    ST_SIZE_OFFSET,
+    ST_BLKSIZE_OFFSET,
+    ST_BLOCKS_OFFSET,
+    ST_ATIME_OFFSET,
+    ST_MTIME_OFFSET,
+    ST_CTIME_OFFSET
+}

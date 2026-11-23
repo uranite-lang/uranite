@@ -34,7 +34,7 @@ const I64 AT_SYMLINK_NOFOLLOW = 256
 const I64 AT_REMOVEDIR = 512
 """unlinkat flag (0x200): remove a directory instead of a file."""
 
-# --- Raw syscall invocation: number in X8, args in X0-X5, return in X0 ---
+# Raw syscall invocation: number in X8, args in X0-X5, return in X0
 
 public function syscall0( I64 number ) -> SyscallResult:
     I64 result = 0
@@ -71,7 +71,7 @@ public function syscall6( I64 number, I64 arg1, I64 arg2, I64 arg3, I64 arg4, I6
     asm "svc #0" : output( "={x0}" result ) : input( "{x8}" number, "{x0}" arg1, "{x1}" arg2, "{x2}" arg3, "{x3}" arg4, "{x4}" arg5, "{x5}" arg6 ) : clobber( "memory" )
     return new SyscallResult( result )
 
-# --- Arity-stable syscall numbers (AArch64 generic ABI) ---
+# Arity-stable syscall numbers (AArch64 generic ABI)
 
 const I64 SYS_READ = 63
 const I64 SYS_WRITE = 64
@@ -92,7 +92,56 @@ const I64 SYS_FLOCK = 32
 const I64 SYS_IOCTL = 29
 const I64 SYS_PIPE2 = 59
 
-# --- *at syscall numbers backing the legacy operation wrappers ---
+# Time and socket syscall numbers (aarch64 / asm-generic)
+
+const I64 SYS_CLOCK_GETTIME = 113
+const I64 SYS_SOCKET = 198
+const I64 SYS_CONNECT = 203
+const I64 SYS_ACCEPT = 202
+const I64 SYS_ACCEPT4 = 242
+const I64 SYS_SENDTO = 206
+const I64 SYS_RECVFROM = 207
+const I64 SYS_SENDMSG = 211
+const I64 SYS_RECVMSG = 212
+const I64 SYS_BIND = 200
+const I64 SYS_LISTEN = 201
+const I64 SYS_SETSOCKOPT = 208
+const I64 SYS_GETSOCKOPT = 209
+const I64 SYS_GETSOCKNAME = 204
+const I64 SYS_GETPEERNAME = 205
+const I64 SYS_SHUTDOWN = 210
+const I64 SYS_SOCKETPAIR = 199
+
+# Additional syscall numbers
+
+const I64 SYS_EPOLL_CREATE1 = 20
+const I64 SYS_EPOLL_CTL = 21
+const I64 SYS_EPOLL_PWAIT = 22
+const I64 SYS_EPOLL_WAIT = 22
+
+const I64 SYS_NANOSLEEP = 101
+const I64 SYS_GETPID = 172
+const I64 SYS_RT_SIGACTION = 134
+const I64 SYS_TIMERFD_CREATE = 85
+const I64 SYS_TIMERFD_SETTIME = 86
+
+const I64 SYS_FORK = 220
+
+const I64 SYS_GETPPID = 173
+const I64 SYS_GETUID = 174
+const I64 SYS_GETGID = 176
+const I64 SYS_GETEUID = 175
+const I64 SYS_GETEGID = 177
+const I64 SYS_KILL = 129
+const I64 SYS_WAIT4 = 260
+const I64 SYS_GETPGID = 155
+const I64 SYS_SETSID = 157
+const I64 SYS_EXECVE = 221
+const I64 SYS_EXIT_GROUP = 94
+const I64 SYS_CLONE = 220
+const I64 SYS_DUP3 = 24
+
+# *at syscall numbers backing the legacy operation wrappers
 
 const I64 SYS_OPENAT = 56
 const I64 SYS_NEWFSTATAT = 79
@@ -124,7 +173,7 @@ const I64 SYS_CHMOD = 53
 const I64 SYS_CHOWN = 54
 const I64 SYS_RENAME = 38
 
-# --- Operation wrappers translating legacy calls to their *at equivalents ---
+# Operation wrappers translating legacy calls to their *at equivalents
 
 public function scOpen( I64 pathPtr, I64 flags, I64 mode ) -> SyscallResult:
     return syscall4( SYS_OPENAT, AT_FDCWD, pathPtr, flags, mode )
@@ -165,6 +214,21 @@ public function scChmod( I64 pathPtr, I64 mode ) -> SyscallResult:
 public function scChown( I64 pathPtr, I64 uid, I64 gid ) -> SyscallResult:
     return syscall5( SYS_FCHOWNAT, AT_FDCWD, pathPtr, uid, gid, 0 )
 
+public function scFork() -> SyscallResult:
+    return syscall5( SYS_CLONE, 17, 0, 0, 0, 0 )
+
+public function scDup2( I64 oldFd, I64 newFd ) -> SyscallResult:
+    return syscall3( SYS_DUP3, oldFd, newFd, 0 )
+
+public function scEpollCreate1() -> SyscallResult:
+    return syscall1( SYS_EPOLL_CREATE1, 0 )
+
+public function scEpollCtl( I64 epfd, I64 operation, I64 fd, I64 eventPtr ) -> SyscallResult:
+    return syscall4( SYS_EPOLL_CTL, epfd, operation, fd, eventPtr )
+
+public function scEpollWait( I64 epfd, I64 eventsPtr, I64 maxEvents, I64 timeoutMs ) -> SyscallResult:
+    return syscall5( SYS_EPOLL_PWAIT, epfd, eventsPtr, maxEvents, timeoutMs, 0 )
+
 export {
     SYS_ACCESS,
     SYS_CHDIR,
@@ -197,9 +261,55 @@ export {
     SYS_SYMLINK,
     SYS_UNLINK,
     SYS_WRITE,
+    SYS_CLOCK_GETTIME,
+    SYS_EPOLL_CREATE1,
+    SYS_EPOLL_CTL,
+    SYS_EPOLL_WAIT,
+    SYS_EPOLL_PWAIT,
+    SYS_NANOSLEEP,
+    SYS_GETPID,
+    SYS_RT_SIGACTION,
+    SYS_TIMERFD_CREATE,
+    SYS_TIMERFD_SETTIME,
+    SYS_CLONE,
+    SYS_DUP3,
+    SYS_EXECVE,
+    SYS_EXIT_GROUP,
+    SYS_FORK,
+    SYS_GETEGID,
+    SYS_GETEUID,
+    SYS_GETGID,
+    SYS_GETPGID,
+    SYS_GETPPID,
+    SYS_GETUID,
+    SYS_KILL,
+    SYS_SETSID,
+    SYS_WAIT4,
+    SYS_SOCKET,
+    SYS_CONNECT,
+    SYS_ACCEPT,
+    SYS_ACCEPT4,
+    SYS_SENDTO,
+    SYS_RECVFROM,
+    SYS_SENDMSG,
+    SYS_RECVMSG,
+    SYS_BIND,
+    SYS_LISTEN,
+    SYS_SETSOCKOPT,
+    SYS_GETSOCKOPT,
+    SYS_GETSOCKNAME,
+    SYS_GETPEERNAME,
+    SYS_SHUTDOWN,
+    SYS_SOCKETPAIR,
     scAccess,
     scChmod,
     scChown,
+    scDup2,
+    scEpollCreate1,
+    scFork,
+    scFork,
+    scEpollCtl,
+    scEpollWait,
     scLink,
     scLstat,
     scMkdir,

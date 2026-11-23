@@ -40,21 +40,24 @@ from uranite.os.syscall.invoke import {
     syscall3,
     syscall4
 }
+from uranite.os.arch.native.syscall import {
+    scFork,
+    SYS_EXIT_GROUP,
+    SYS_GETPID,
+    SYS_GETPPID,
+    SYS_GETUID,
+    SYS_GETGID,
+    SYS_GETEUID,
+    SYS_GETEGID,
+    SYS_FORK,
+    SYS_KILL,
+    SYS_NANOSLEEP,
+    SYS_WAIT4,
+    SYS_GETPGID,
+    SYS_SETSID
+}
 from uranite.os.syscall.result import SyscallResult
 
-const I64 SYS_EXIT_GROUP = 231
-const I64 SYS_GETPID = 39
-const I64 SYS_GETPPID = 110
-const I64 SYS_GETUID = 102
-const I64 SYS_GETGID = 104
-const I64 SYS_GETEUID = 107
-const I64 SYS_GETEGID = 108
-const I64 SYS_FORK = 57
-const I64 SYS_KILL = 62
-const I64 SYS_NANOSLEEP = 35
-const I64 SYS_WAIT4 = 61
-const I64 SYS_GETPGID = 121
-const I64 SYS_SETSID = 112
 const I64 SIGTERM = 15
 const I64 SIGKILL = 9
 const I64 SIGINT = 2
@@ -192,7 +195,7 @@ public function fork() -> I64:
         Space: O(1)
     """
     
-    SyscallResult result = syscall0( SYS_FORK )
+    SyscallResult result = scFork()
     if result.isError():
         raise new ProcessError( "fork failed", result.errorCode(), None )
     return result.value()

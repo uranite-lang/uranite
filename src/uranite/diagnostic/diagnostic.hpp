@@ -219,6 +219,11 @@ namespace uranite::diagnostic {
 			}
 			
 			/**
+			 * @brief Clears all captured diagnostics and resets counters.
+			 */
+			void clear();
+			
+			/**
 			 * @brief Sets the source code lines for contextual reporting.
 			 * @param lines A reference to a vector of strings containing source lines.
 			 */
