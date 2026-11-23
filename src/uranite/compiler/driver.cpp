@@ -161,22 +161,45 @@ namespace uranite::compiler {
 		return "";
 	}
 	
+	void Driver::setSourceProvider( const lookup::SourceProviderSharedPointer& provider ) {
+		this->sourceProvider_ = provider;
+	}
+	
 	bool Driver::loadModule( const std::string& filePath, ast::nodes::Program& targetProgram, const ast::nodes::ImportDeclaration* importDeclaration ) {
-		std::string canonicalPath = std::filesystem::canonical( filePath ).string();
+		std::string canonicalPath;
+		try {
+			canonicalPath = std::filesystem::canonical( filePath ).string();
+		}
+		catch( ... ) {
+			canonicalPath = filePath;
+		}
 		ast::nodes::ProgramSharedPointer moduleProgram;
 		std::unordered_map<std::string, ModuleInfo>::iterator cacheIterator = this->modules.find( canonicalPath );
 		if( cacheIterator != this->modules.end() ) {
 			moduleProgram = cacheIterator->second.program;
 		}
 		else {
-			std::ifstream moduleFile( filePath );
-			if( moduleFile.is_open() == false ) {
-				fmt::print( stderr, "error: could not open module \"{}\"\n", filePath );
+			std::string moduleSource;
+			if( this->sourceProvider_ != nullptr ) {
+				std::optional<std::string> provided = this->sourceProvider_->read( filePath );
+				if( provided.has_value() ) {
+					moduleSource = provided.value();
+				}
+			}
+			if( moduleSource.empty() && this->sourceProvider_ == nullptr ) {
+				std::ifstream moduleFile( filePath );
+				if( moduleFile.is_open() == false ) {
+					fmt::print( stderr, "error: could not open module \"{}\"\n", filePath );
+					return false;
+				}
+				std::ostringstream moduleStream;
+				moduleStream << moduleFile.rdbuf();
+				moduleSource = moduleStream.str();
+			}
+			if( moduleSource.empty() ) {
+				fmt::print( stderr, "error: could not read module \"{}\"\n", filePath );
 				return false;
 			}
-			std::ostringstream moduleStream;
-			moduleStream << moduleFile.rdbuf();
-			std::string moduleSource = moduleStream.str();
 			if( this->options.verbose ) {
 				spdlog::info( "loading module: {}", filePath );
 			}
@@ -502,7 +525,54 @@ namespace uranite::compiler {
 		return true;
 	}
 	
+	void Driver::loadStandardModules( ast::nodes::Program& program ) {
+		std::string modulesDir = this->findModulesDirectory();
+		if( modulesDir.empty() ) {
+			return;
+		}
+		std::set<std::string> existingClassNames;
+		std::set<std::string> existingConstantNames;
+		std::set<std::string> existingEnumNames;
+		for( const ast::nodes::DeclarationSharedPointer& existingDeclaration : program.declarations ) {
+			if( existingDeclaration == nullptr ) { continue; }
+			if( existingDeclaration->kind == ast::Node::Kind::ClassDeclaration ) {
+				existingClassNames.insert( static_cast<const ast::nodes::ClassDeclaration&>( *existingDeclaration ).name );
+			}
+			else if( existingDeclaration->kind == ast::Node::Kind::StructDeclaration ) {
+				existingClassNames.insert( static_cast<const ast::nodes::StructDeclaration&>( *existingDeclaration ).name );
+			}
+			else if( existingDeclaration->kind == ast::Node::Kind::ConstantDeclaration ) {
+				existingConstantNames.insert( static_cast<const ast::nodes::ConstantDeclaration&>( *existingDeclaration ).name );
+			}
+			else if( existingDeclaration->kind == ast::Node::Kind::EnumDeclaration ) {
+				existingEnumNames.insert( static_cast<const ast::nodes::EnumDeclaration&>( *existingDeclaration ).name );
+			}
+		}
+		auto tryLoad = [&]( const std::string& relativePath ) {
+			std::filesystem::path modulePath = std::filesystem::path( modulesDir ) / relativePath;
+			if( std::filesystem::exists( modulePath ) ) {
+				this->loadModule( modulePath.string(), program );
+			}
+		};
+		std::filesystem::path objectModulePath = std::filesystem::path( modulesDir ) / "language" / "object.urn";
+		if( std::filesystem::exists( objectModulePath ) ) { this->loadModule( objectModulePath.string(), program ); }
+		std::filesystem::path tupleModulePath = std::filesystem::path( modulesDir ) / "collection" / "tuple.urn";
+		if( std::filesystem::exists( tupleModulePath ) ) { this->loadModule( tupleModulePath.string(), program ); }
+		tryLoad( "os/signal.urn" );
+		tryLoad( "math/errors.urn" );
+	}
+	
 	int Driver::readSource() {
+		if( this->sourceProvider_ != nullptr ) {
+			std::optional<std::string> provided = this->sourceProvider_->read( this->options.output.source );
+			if( provided.has_value() ) {
+				this->source = provided.value();
+				if( this->options.verbose ) {
+					spdlog::info( "read {} bytes from \"{}\" (provider)", this->source.size(), this->options.output.source );
+				}
+				return 0;
+			}
+		}
 		std::ifstream sourceFile( this->options.output.source );
 		if( sourceFile.is_open() == false ) {
 			fmt::print( stderr, "error: could not open file \"{}\"\n", this->options.output.source );

@@ -38,6 +38,10 @@ from uranite.io.syscall import {
     sysLstat,
     sysStat
 }
+from uranite.os.arch.native.stat import {
+    STAT_ARCH,
+    STAT_SIZE
+}
 from uranite.memory.memory import Memory
 
 public enum FileType:
@@ -390,18 +394,44 @@ function parseStatBuffer( I64 bufAddr ) -> FileStat:
             A new FileStat populated with all parsed fields.
     """
     
-    I64 deviceId = readI64At( bufAddr, 0 )
-    I64 inodeNumber = readI64At( bufAddr, 8 )
-    I64 linkCount = readI64At( bufAddr, 16 )
-    I64 mode = readI32At( bufAddr, 24 )
-    I64 uid = readI32At( bufAddr, 28 )
-    I64 gid = readI32At( bufAddr, 32 )
-    I64 size = readI64At( bufAddr, 48 )
-    I64 blockSize = readI64At( bufAddr, 56 )
-    I64 blocks = readI64At( bufAddr, 64 )
-    I64 accessTime = readI64At( bufAddr, 72 )
-    I64 modifyTime = readI64At( bufAddr, 88 )
-    I64 changeTime = readI64At( bufAddr, 104 )
+    I64 deviceId = 0
+    I64 inodeNumber = 0
+    I64 linkCount = 0
+    I64 mode = 0
+    I64 uid = 0
+    I64 gid = 0
+    I64 size = 0
+    I64 blockSize = 0
+    I64 blocks = 0
+    I64 accessTime = 0
+    I64 modifyTime = 0
+    I64 changeTime = 0
+    if STAT_ARCH == 1:
+        deviceId = readI64At( bufAddr, 0 )
+        inodeNumber = readI64At( bufAddr, 8 )
+        mode = readI32At( bufAddr, 16 )
+        linkCount = readI32At( bufAddr, 20 )
+        uid = readI32At( bufAddr, 24 )
+        gid = readI32At( bufAddr, 28 )
+        size = readI64At( bufAddr, 48 )
+        blockSize = readI32At( bufAddr, 56 )
+        blocks = readI64At( bufAddr, 64 )
+        accessTime = readI64At( bufAddr, 72 )
+        modifyTime = readI64At( bufAddr, 88 )
+        changeTime = readI64At( bufAddr, 104 )
+    else:
+        deviceId = readI64At( bufAddr, 0 )
+        inodeNumber = readI64At( bufAddr, 8 )
+        linkCount = readI64At( bufAddr, 16 )
+        mode = readI32At( bufAddr, 24 )
+        uid = readI32At( bufAddr, 28 )
+        gid = readI32At( bufAddr, 32 )
+        size = readI64At( bufAddr, 48 )
+        blockSize = readI64At( bufAddr, 56 )
+        blocks = readI64At( bufAddr, 64 )
+        accessTime = readI64At( bufAddr, 72 )
+        modifyTime = readI64At( bufAddr, 88 )
+        changeTime = readI64At( bufAddr, 104 )
     return new FileStat( deviceId, inodeNumber, linkCount, mode, uid, gid, size, blockSize, blocks, accessTime, modifyTime, changeTime )
 
 public function statPath( String path ) -> FileStat:

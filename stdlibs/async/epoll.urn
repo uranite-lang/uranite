@@ -9,17 +9,16 @@ from uranite.io.syscall import {
     writeI64At
 }
 from uranite.memory.memory import Memory
+from uranite.os.arch.native.syscall import {
+    scEpollCreate1,
+    scEpollCtl,
+    scEpollWait,
+    SYS_EPOLL_CREATE1,
+    SYS_EPOLL_CTL,
+    SYS_EPOLL_WAIT
+}
 from uranite.os.syscall.invoke import syscall1, syscall2, syscall4
 from uranite.os.syscall.result import SyscallResult
-
-const I64 SYS_EPOLL_CREATE1 = 291
-""" Syscall number for epoll_create1 on x86-64 Linux. """
-
-const I64 SYS_EPOLL_CTL = 233
-""" Syscall number for epoll_ctl on x86-64 Linux. """
-
-const I64 SYS_EPOLL_WAIT = 232
-""" Syscall number for epoll_wait on x86-64 Linux. """
 
 const I64 EPOLL_CTL_ADD = 1
 """ epoll_ctl operation to register a new file descriptor. """
@@ -197,7 +196,7 @@ public function epollWait( I64 epfd, I64 eventsBufPtr, I64 maxEvents, I64 timeou
         Space: O(1)
     """
     
-    SyscallResult syscallResult = syscall4( SYS_EPOLL_WAIT, epfd, eventsBufPtr, maxEvents, timeoutMs )
+    SyscallResult syscallResult = scEpollWait( epfd, eventsBufPtr, maxEvents, timeoutMs )
     if syscallResult.isError():
         I64 err = syscallResult.errorCode()
         if err == 4:

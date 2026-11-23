@@ -48,40 +48,20 @@ from uranite.os.syscall.invoke import {
     syscall5,
     syscall6
 }
+from uranite.os.arch.native.syscall import {
+    SYS_SOCKET,
+    SYS_CONNECT,
+    SYS_ACCEPT,
+    SYS_SENDTO,
+    SYS_RECVFROM,
+    SYS_BIND,
+    SYS_LISTEN,
+    SYS_SETSOCKOPT,
+    SYS_GETSOCKNAME,
+    SYS_GETPEERNAME,
+    SYS_SHUTDOWN
+}
 from uranite.os.syscall.result import SyscallResult
-
-const I64 SYS_SOCKET = 41
-"""Linux x86_64 syscall number for socket(2)."""
-
-const I64 SYS_CONNECT = 42
-"""Linux x86_64 syscall number for connect(2)."""
-
-const I64 SYS_ACCEPT = 43
-"""Linux x86_64 syscall number for accept(2)."""
-
-const I64 SYS_SENDTO = 44
-"""Linux x86_64 syscall number for sendto(2)."""
-
-const I64 SYS_RECVFROM = 45
-"""Linux x86_64 syscall number for recvfrom(2)."""
-
-const I64 SYS_BIND = 49
-"""Linux x86_64 syscall number for bind(2)."""
-
-const I64 SYS_LISTEN = 50
-"""Linux x86_64 syscall number for listen(2)."""
-
-const I64 SYS_SETSOCKOPT = 54
-"""Linux x86_64 syscall number for setsockopt(2)."""
-
-const I64 SYS_GETSOCKNAME = 51
-"""Linux x86_64 syscall number for getsockname(2)."""
-
-const I64 SYS_GETPEERNAME = 52
-"""Linux x86_64 syscall number for getpeername(2)."""
-
-const I64 SYS_SHUTDOWN = 48
-"""Linux x86_64 syscall number for shutdown(2)."""
 
 const I64 AF_INET = 2
 """IPv4 address family constant."""
