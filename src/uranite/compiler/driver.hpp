@@ -20,6 +20,8 @@
 #ifndef _URANITE_COMPILER_DRIVER_HPP_
 #define _URANITE_COMPILER_DRIVER_HPP_
 
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -28,6 +30,7 @@
 #include "uranite/ast/node.hpp"
 #include "uranite/compiler/option.hpp"
 #include "uranite/diagnostic/diagnostic.hpp"
+#include "uranite/lookup/source-provider.hpp"
 #include "uranite/semantic/symbol.hpp"
 #include "uranite/semantic/typeref.hpp"
 
@@ -104,6 +107,27 @@ namespace uranite::compiler {
 			
 			/** @brief Returns the collection of loaded and analyzed modules. */
 			const std::unordered_map<std::string, ModuleInfo>& getModules() const { return modules; }
+			
+			/** @brief Loads the standard auto-imported modules (object, tuple, args, ...) into the program. */
+			void loadStandardModules( ast::nodes::Program& program );
+			
+			/**
+			 * @brief Installs an in-memory source provider consulted before disk reads.
+			 *
+			 * Used by editor integrations to surface unsaved buffers. A null provider
+			 * (the default) restores disk-only behavior.
+			 */
+			void setSourceProvider( const lookup::SourceProviderSharedPointer& provider );
+			
+			/** @brief Returns the diagnostic engine owned by this driver. */
+			diagnostic::Engine& diagnosticEngine() { return diagnostic; }
+			const diagnostic::Engine& diagnosticEngine() const { return diagnostic; }
+			
+			/** @brief Returns accumulated module types from cross-module analysis. */
+			const std::unordered_map<std::string, semantic::TypeSharedPointer>& accumulatedModuleTypes() const { return accumulatedModuleTypes_; }
+			
+			/** @brief Returns accumulated module symbols from cross-module analysis. */
+			const std::unordered_map<std::string, std::vector<semantic::SymbolSharedPointer>>& accumulatedModuleSymbols() const { return accumulatedModuleSymbols_; }
 		
 		private:
 			
@@ -115,6 +139,9 @@ namespace uranite::compiler {
 			
 			/** @brief Diagnostic engine instance for reporting errors and warnings. */
 			diagnostic::Engine diagnostic;
+			
+			/** @brief Optional in-memory source provider consulted before disk reads. */
+			lookup::SourceProviderSharedPointer sourceProvider_;
 			
 			/** @brief Cached result of modules directory lookup. */
 			mutable std::string cachedModulesDirectory_;
