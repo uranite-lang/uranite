@@ -2076,8 +2076,11 @@ namespace uranite::parser {
 				lookup::SourceSharedPointer source = this->current().source;
 				this->advance();
 				std::string member;
+				lookup::SourceSharedPointer memberSource = source;
 				if( this->check( token::Type::Identifier ) ) {
-					member = this->advance().value;
+					token::Token memberToken = this->advance();
+					member = memberToken.value;
+					memberSource = memberToken.source;
 				}
 				std::vector<ast::nodes::TypeNodeSharedPointer> methodTypeArgs;
 				if( this->check( token::Type::LessThan ) && this->looksLikeGenericCall() ) {
@@ -2109,13 +2112,13 @@ namespace uranite::parser {
 						while( this->match( token::Type::Comma ) );
 					}
 					this->expect( token::Type::RightParenthesis, "expected ')' after method arguments" );
-					ast::nodes::MethodCallExpression* methodCallExpr = new ast::nodes::MethodCallExpression( expression, member, std::move( arguments ), source );
+					ast::nodes::MethodCallExpression* methodCallExpr = new ast::nodes::MethodCallExpression( expression, member, std::move( arguments ), source, memberSource );
 					methodCallExpr->keywordArguments = std::move( methodKeywordArguments );
 					methodCallExpr->typeArguments = std::move( methodTypeArgs );
 					expression = std::shared_ptr<ast::nodes::MethodCallExpression>( methodCallExpr );
 				}
 				else {
-					expression = std::make_shared<ast::nodes::MemberAccessExpression>( expression, member, source );
+					expression = std::make_shared<ast::nodes::MemberAccessExpression>( expression, member, source, memberSource );
 				}
 			}
 			else if( this->check( token::Type::LeftBracket ) ) {
@@ -2129,8 +2132,11 @@ namespace uranite::parser {
 				lookup::SourceSharedPointer source = this->current().source;
 				this->advance();
 				std::string member;
+				lookup::SourceSharedPointer memberSource = source;
 				if( this->check( token::Type::Identifier ) ) {
-					member = this->advance().value;
+					token::Token memberToken = this->advance();
+					member = memberToken.value;
+					memberSource = memberToken.source;
 				}
 				if( this->check( token::Type::LeftParenthesis ) ) {
 					this->advance();
@@ -2142,10 +2148,10 @@ namespace uranite::parser {
 						while( this->match( token::Type::Comma ) );
 					}
 					this->expect( token::Type::RightParenthesis, "expected ')'" );
-					expression = std::make_shared<ast::nodes::MethodCallExpression>( expression, member, std::move( arguments ), source );
+					expression = std::make_shared<ast::nodes::MethodCallExpression>( expression, member, std::move( arguments ), source, memberSource );
 				}
 				else {
-					expression = std::make_shared<ast::nodes::MemberAccessExpression>( expression, member, source );
+					expression = std::make_shared<ast::nodes::MemberAccessExpression>( expression, member, source, memberSource );
 				}
 			}
 			else if( this->check( token::Type::Question ) ) {
@@ -2550,7 +2556,9 @@ namespace uranite::parser {
 						if( looksLikeType && this->check( token::Type::Identifier ) ) {
 							this->position = typeStartPosition;
 							ast::nodes::TypeNodeSharedPointer parsedTypeNode = this->parseTypeNode();
-							std::string variableName = this->expect( token::Type::Identifier, "expected variable name" ).value;
+							token::Token nameToken = this->expect( token::Type::Identifier, "expected variable name" );
+							std::string variableName = nameToken.value;
+							lookup::SourceSharedPointer nameSource = nameToken.source;
 							ast::nodes::ExpressionSharedPointer initializationExpression;
 							if( this->match( token::Type::Assignment ) ) {
 								initializationExpression = this->parseExpression();
@@ -2564,7 +2572,8 @@ namespace uranite::parser {
 								initializationExpression, 
 								isConstVariable == false,
 								isConstVariable, 
-								this->current().source 
+								nameSource,
+								nameSource
 							);
 							return variableStatement;
 						}
