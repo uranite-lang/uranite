@@ -526,6 +526,15 @@ namespace uranite::semantic {
 			}
 			else if( declaration->kind == ast::Node::Kind::FunctionDeclaration ) {
 				ast::nodes::FunctionDeclaration& functionDeclaration = static_cast<ast::nodes::FunctionDeclaration&>( *declaration );
+				std::unordered_set<std::string> savedFuncGenericParams = this->currentGenericParameterNames;
+				std::vector<std::pair<std::string, TypeSharedPointer>> savedFuncGenericTypes;
+				for( ast::nodes::GenericParameterSharedPointer& genericParameter : functionDeclaration.genericParameters ) {
+					TypeSharedPointer existing = this->typeRegistry.lookupType( genericParameter->name );
+					savedFuncGenericTypes.emplace_back( genericParameter->name, existing );
+					GenericParameterTypeSharedPointer genericParameterType = std::make_shared<GenericParameterType>( genericParameter->name );
+					this->typeRegistry.registerType( genericParameter->name, genericParameterType );
+					this->currentGenericParameterNames.insert( genericParameter->name );
+				}
 				std::vector<TypeSharedPointer> parameterTypes;
 				std::vector<std::string> parameterNames;
 				int regVariadicIdx = -1;
@@ -581,11 +590,23 @@ namespace uranite::semantic {
 				concreteFuncType->keywordValueType = regKwargValType;
 				concreteFuncType->keywordOnlyParamNames = std::move( regKwOnlyNames );
 				concreteFuncType->keywordOnlyParamTypes = std::move( regKwOnlyTypes );
+				for( ast::nodes::GenericParameterSharedPointer& genericParameter : functionDeclaration.genericParameters ) {
+					concreteFuncType->genericParameterNames.push_back( genericParameter->name );
+				}
 				SymbolSharedPointer functionSymbol = std::make_shared<Symbol>( functionDeclaration.name, Symbol::Kind::Function, functionDeclaration.source, functionType );
 				functionSymbol->access = functionDeclaration.access;
 				functionSymbol->isInitialized = true;
 				functionSymbol->sourceModule = this->currentPackageName;
 				this->currentScope->define( functionDeclaration.name, functionSymbol );
+				for( std::pair<std::string, TypeSharedPointer>& saved : savedFuncGenericTypes ) {
+					if( saved.second != nullptr ) {
+						this->typeRegistry.registerType( saved.first, saved.second );
+					}
+					else {
+						this->typeRegistry.unregisterType( saved.first );
+					}
+				}
+				this->currentGenericParameterNames = savedFuncGenericParams;
 			}
 			else if( declaration->kind == ast::Node::Kind::ConstantDeclaration ) {
 				ast::nodes::ConstantDeclaration& constDeclaration = static_cast<ast::nodes::ConstantDeclaration&>( *declaration );
@@ -857,12 +878,14 @@ namespace uranite::semantic {
 				}
 				case ast::Node::Kind::FunctionDeclaration: {
 					ast::nodes::FunctionDeclaration& functionDeclaration = static_cast<ast::nodes::FunctionDeclaration&>( *declaration );
+					std::unordered_set<std::string> savedPreRegFuncGenericParams = this->currentGenericParameterNames;
 					std::vector<std::pair<std::string, TypeSharedPointer>> savedPreRegGenericTypes;
 					for( ast::nodes::GenericParameterSharedPointer& genericParameter : functionDeclaration.genericParameters ) {
 						TypeSharedPointer existing = this->typeRegistry.lookupType( genericParameter->name );
 						savedPreRegGenericTypes.emplace_back( genericParameter->name, existing );
 						GenericParameterTypeSharedPointer genericParameterType = std::make_shared<GenericParameterType>( genericParameter->name );
 						this->typeRegistry.registerType( genericParameter->name, genericParameterType );
+						this->currentGenericParameterNames.insert( genericParameter->name );
 					}
 					for( ast::nodes::StatementSharedPointer& bodyStatement : functionDeclaration.body ) {
 						if( statementContainsYield( bodyStatement ) ) {
@@ -962,6 +985,7 @@ namespace uranite::semantic {
 							this->typeRegistry.unregisterType( saved.first );
 						}
 					}
+					this->currentGenericParameterNames = savedPreRegFuncGenericParams;
 					break;
 				}
 				case ast::Node::Kind::TypeAliasDeclaration: {
@@ -1380,6 +1404,12 @@ namespace uranite::semantic {
 			}
 			if( calleeType->kind == Type::Kind::Class ) {
 				ClassTypeSharedPointer classType = std::static_pointer_cast<ClassType>( calleeType );
+				if( expression.callee->kind == ast::Node::Kind::ParentExpression ) {
+					for( ast::nodes::ExpressionSharedPointer& argumentExpression : expression.arguments ) {
+						this->analyzeExpression( argumentExpression );
+					}
+					return this->typeRegistry.getVoid();
+				}
 				if( classType->isAbstract ) {
 					std::string errorMessage = fmt::format( "cannot instantiate abstract class \"{}\"", calleeType->name );
 					this->diagnostic.error( expression.source, errorMessage );
@@ -1722,6 +1752,10 @@ namespace uranite::semantic {
 		ClassTypeSharedPointer classType = std::dynamic_pointer_cast<ClassType>( this->typeRegistry.lookupType( declaration.name ) );
 		if( classType == nullptr ) {
 			return;
+		}
+		std::unordered_set<std::string> savedCurrentGenericParams = this->currentGenericParameterNames;
+		for( ast::nodes::GenericParameterSharedPointer& gp : declaration.genericParameters ) {
+			this->currentGenericParameterNames.insert( gp->name );
 		}
 		classType->isAbstract = declaration.isAbstract;
 		classType->isFinal = declaration.isFinal;
@@ -2183,6 +2217,7 @@ namespace uranite::semantic {
 				this->typeRegistry.unregisterType( saved.first );
 			}
 		}
+		this->currentGenericParameterNames = savedCurrentGenericParams;
 	}
 	
 	void Analyzer::analyzeDeclaration( ast::nodes::DeclarationSharedPointer& declaration ) {
@@ -2241,6 +2276,10 @@ namespace uranite::semantic {
 		EnumTypeSharedPointer enumType = std::dynamic_pointer_cast<EnumType>( this->typeRegistry.lookupType( declaration.name ) );
 		if( enumType == nullptr ) {
 			return;
+		}
+		std::unordered_set<std::string> savedCurrentGenericParams = this->currentGenericParameterNames;
+		for( ast::nodes::GenericParameterSharedPointer& gp : declaration.genericParameters ) {
+			this->currentGenericParameterNames.insert( gp->name );
 		}
 		if( declaration.backedType ) {
 			enumType->backedType = this->resolveType( declaration.backedType );
@@ -2357,6 +2396,7 @@ namespace uranite::semantic {
 				}
 			}
 		}
+		this->currentGenericParameterNames = savedCurrentGenericParams;
 	}
 	
 	TypeSharedPointer Analyzer::analyzeExpression( ast::nodes::ExpressionSharedPointer& expression ) {
@@ -2699,6 +2739,29 @@ namespace uranite::semantic {
 				}
 				break;
 			}
+			case ast::Node::Kind::ParentExpression: {
+				ScopeSharedPointer currentSearchingScope = this->currentScope;
+				ClassTypeSharedPointer currentClassType = nullptr;
+				while( currentSearchingScope ) {
+					if( currentSearchingScope->classType ) {
+						currentClassType = std::static_pointer_cast<semantic::ClassType>( currentSearchingScope->classType );
+						break;
+					}
+					currentSearchingScope = currentSearchingScope->parent();
+				}
+				if( currentClassType == nullptr ) {
+					this->diagnostic.error( expression->source, "\"parent\" used outside of class context" );
+					expressionType = this->typeRegistry.getError();
+				}
+				else if( currentClassType->baseClass == nullptr ) {
+					this->diagnostic.error( expression->source, "\"parent\" used in class with no base class" );
+					expressionType = this->typeRegistry.getError();
+				}
+				else {
+					expressionType = currentClassType->baseClass;
+				}
+				break;
+			}
 			case ast::Node::Kind::StringLiteral: {
 				TypeSharedPointer stringClassType = this->typeRegistry.lookupType( qualname::classes::string::Name );
 				expressionType = stringClassType ? stringClassType : this->typeRegistry.getString();
@@ -2982,6 +3045,10 @@ namespace uranite::semantic {
 	}
 	
 	void Analyzer::analyzeFunctionDeclaration( ast::nodes::FunctionDeclaration& declaration ) {
+		std::unordered_set<std::string> savedCurrentGenericParams = this->currentGenericParameterNames;
+		for( ast::nodes::GenericParameterSharedPointer& gp : declaration.genericParameters ) {
+			this->currentGenericParameterNames.insert( gp->name );
+		}
 		std::vector<std::string> functionGenericNames;
 		std::vector<std::pair<std::string, TypeSharedPointer>> savedFunctionGenericTypes;
 		for( ast::nodes::GenericParameterSharedPointer& genericParameter : declaration.genericParameters ) {
@@ -3264,6 +3331,7 @@ namespace uranite::semantic {
 				this->typeRegistry.unregisterType( saved.first );
 			}
 		}
+		this->currentGenericParameterNames = savedCurrentGenericParams;
 	}
 	
 	TypeSharedPointer Analyzer::analyzeIdentifierExpression( ast::nodes::IdentifierExpression& expression ) {
@@ -3490,6 +3558,10 @@ namespace uranite::semantic {
 		if( interfaceType == nullptr ) {
 			return;
 		}
+		std::unordered_set<std::string> savedCurrentGenericParams = this->currentGenericParameterNames;
+		for( ast::nodes::GenericParameterSharedPointer& gp : declaration.genericParameters ) {
+			this->currentGenericParameterNames.insert( gp->name );
+		}
 		bool isAlreadyPreRegistered = interfaceType->methods.empty() == false;
 		if( isAlreadyPreRegistered == false ) {
 			for( ast::nodes::GenericParameterSharedPointer& genericParameter : declaration.genericParameters ) {
@@ -3555,6 +3627,7 @@ namespace uranite::semantic {
 			this->analyzeDeclaration( nestedDeclaration );
 		}
 		this->popScope();
+		this->currentGenericParameterNames = savedCurrentGenericParams;
 	}
 	
 	void Analyzer::analyzeMatchStatement( ast::nodes::MatchStatement& statement ) {
@@ -3597,6 +3670,10 @@ namespace uranite::semantic {
 					this->diagnostic.error( expression.source, uninitializedFieldErrorMessage );
 				}
 				TypeSharedPointer fieldType = fieldInformation->type;
+				lookup::SourceSharedPointer memberSource = expression.memberSource ? expression.memberSource : expression.source;
+				SymbolSharedPointer fieldSymbol = std::make_shared<Symbol>( fieldInformation->name, Symbol::Kind::Field, memberSource, fieldType );
+				expression.resolvedMemberSymbol = fieldSymbol;
+				expression.resolvedSymbol = fieldSymbol;
 				if( fieldType && fieldType->kind == Type::Kind::GenericParameter ) {
 					GenericParameterTypeSharedPointer genericParameter = std::static_pointer_cast<GenericParameterType>( fieldType );
 					std::unordered_map<std::string,TypeSharedPointer>::iterator substitutionIterator = classType->typeSubstitutions.find( genericParameter->name );
@@ -3640,6 +3717,10 @@ namespace uranite::semantic {
 			}
 			if( fieldInformation ) {
 				TypeSharedPointer fieldType = fieldInformation->type;
+				lookup::SourceSharedPointer memberSource = expression.memberSource ? expression.memberSource : expression.source;
+				SymbolSharedPointer fieldSymbol = std::make_shared<Symbol>( fieldInformation->name, Symbol::Kind::Field, memberSource, fieldType );
+				expression.resolvedMemberSymbol = fieldSymbol;
+				expression.resolvedSymbol = fieldSymbol;
 				if( fieldType && fieldType->kind == Type::Kind::GenericParameter ) {
 					GenericParameterTypeSharedPointer genericParameter = std::static_pointer_cast<GenericParameterType>( fieldType );
 					std::unordered_map<std::string,TypeSharedPointer>::iterator substitutionIterator = structType->typeSubstitutions.find( genericParameter->name );
@@ -3924,6 +4005,10 @@ namespace uranite::semantic {
 			if( methodInformation != nullptr && methodInformation->type != nullptr && methodInformation->type->kind == Type::Kind::Function ) {
 				FunctionTypeSharedPointer functionType = std::static_pointer_cast<FunctionType>( methodInformation->type );
 				TypeSharedPointer returnType = functionType->returnType;
+				lookup::SourceSharedPointer memberSource = expression.memberSource ? expression.memberSource : expression.source;
+				SymbolSharedPointer methodSymbol = std::make_shared<Symbol>( expression.method, Symbol::Kind::Function, memberSource, methodInformation->type );
+				expression.resolvedMemberSymbol = methodSymbol;
+				expression.resolvedSymbol = methodSymbol;
 				std::unordered_map<std::string, TypeSharedPointer> genericSubstitutionMap;
 				if( functionType->genericParameterNames.empty() == false && expression.typeArguments.empty() == false ) {
 					if( expression.typeArguments.size() != functionType->genericParameterNames.size() ) {
@@ -4219,6 +4304,15 @@ namespace uranite::semantic {
 			case ast::Node::Kind::UnsafeBlock:
 				this->analyzeUnsafeBlockStatement( static_cast<ast::nodes::UnsafeBlockStatement&>( *statement ) );
 				break;
+			case ast::Node::Kind::BlockStatement: {
+				ast::nodes::BlockStatement& blockStatement = static_cast<ast::nodes::BlockStatement&>( *statement );
+				this->pushScope( Scope::Kind::Block );
+				for( ast::nodes::StatementSharedPointer& bodyStatement : blockStatement.statements ) {
+					this->analyzeStatement( bodyStatement );
+				}
+				this->popScope();
+				break;
+			}
 			case ast::Node::Kind::ExpressionStatement: {
 				ast::nodes::ExpressionStatement& expressionStatement = static_cast<ast::nodes::ExpressionStatement&>( *statement );
 				this->analyzeExpression( expressionStatement.expression );
@@ -4328,6 +4422,10 @@ namespace uranite::semantic {
 		StructTypeSharedPointer structType = std::dynamic_pointer_cast<StructType>( this->typeRegistry.lookupType( declaration.name ) );
 		if( structType == nullptr ) {
 			return;
+		}
+		std::unordered_set<std::string> savedCurrentGenericParams = this->currentGenericParameterNames;
+		for( ast::nodes::GenericParameterSharedPointer& gp : declaration.genericParameters ) {
+			this->currentGenericParameterNames.insert( gp->name );
 		}
 		for( std::string& traitName : declaration.usedTraits ) {
 			TraitTypeSharedPointer traitType = std::dynamic_pointer_cast<TraitType>( this->typeRegistry.lookupType( traitName ) );
@@ -4451,6 +4549,7 @@ namespace uranite::semantic {
 			this->typeRegistry.registerType( savedIterator->first, savedIterator->second );
 		}
 		this->popScope();
+		this->currentGenericParameterNames = savedCurrentGenericParams;
 	}
 	
 	void Analyzer::analyzeTraitDeclaration( ast::nodes::TraitDeclaration& declaration ) {
@@ -4631,12 +4730,13 @@ namespace uranite::semantic {
 		if( variableType == nullptr ) {
 			variableType = this->typeRegistry.getError();
 		}
-		SymbolSharedPointer variableSymbol = std::make_shared<Symbol>( statement.name, Symbol::Kind::Variable, statement.source, variableType );
+		lookup::SourceSharedPointer variableSource = statement.nameSource ? statement.nameSource : statement.source;
+		SymbolSharedPointer variableSymbol = std::make_shared<Symbol>( statement.name, Symbol::Kind::Variable, variableSource, variableType );
 		variableSymbol->isMutable = statement.isMutable;
 		variableSymbol->isInitialized = statement.initializer != nullptr || ( variableType && variableType->kind == Type::Kind::Optional );
 		if( this->currentScope->define( statement.name, variableSymbol ) == false ) {
 			std::string redefinitionErrorMessage = fmt::format( "redefinition of variable \"{}\"", statement.name );
-			this->diagnostic.error( statement.source, redefinitionErrorMessage );
+			this->diagnostic.error( variableSource, redefinitionErrorMessage );
 		}
 	}
 	
@@ -5484,6 +5584,55 @@ namespace uranite::semantic {
 		return false;
 	}
 	
+	bool Analyzer::isKnownGenericParameterName( const std::string& name ) const {
+		for( const std::pair<const std::string, TypeSharedPointer>& typeEntry : this->typeRegistry.getUserTypes() ) {
+			if( typeEntry.second == nullptr ) {
+				continue;
+			}
+			if( typeEntry.second->kind == Type::Kind::Class ) {
+				ClassTypeSharedPointer classType = std::static_pointer_cast<ClassType>( typeEntry.second );
+				for( const TypeSharedPointer& genericParam : classType->genericParameters ) {
+					if( genericParam != nullptr && genericParam->name == name ) {
+						return true;
+					}
+				}
+			}
+			else if( typeEntry.second->kind == Type::Kind::Struct ) {
+				StructTypeSharedPointer structType = std::static_pointer_cast<StructType>( typeEntry.second );
+				for( const TypeSharedPointer& genericParam : structType->genericParameters ) {
+					if( genericParam != nullptr && genericParam->name == name ) {
+						return true;
+					}
+				}
+			}
+			else if( typeEntry.second->kind == Type::Kind::Interface ) {
+				InterfaceTypeSharedPointer interfaceType = std::static_pointer_cast<InterfaceType>( typeEntry.second );
+				for( const TypeSharedPointer& genericParam : interfaceType->genericParameters ) {
+					if( genericParam != nullptr && genericParam->name == name ) {
+						return true;
+					}
+				}
+			}
+			else if( typeEntry.second->kind == Type::Kind::Enum ) {
+				EnumTypeSharedPointer enumType = std::static_pointer_cast<EnumType>( typeEntry.second );
+				for( const TypeSharedPointer& genericParam : enumType->genericParameters ) {
+					if( genericParam != nullptr && genericParam->name == name ) {
+						return true;
+					}
+				}
+			}
+			else if( typeEntry.second->kind == Type::Kind::Function ) {
+				FunctionTypeSharedPointer funcType = std::static_pointer_cast<FunctionType>( typeEntry.second );
+				for( const std::string& genericName : funcType->genericParameterNames ) {
+					if( genericName == name ) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+	
 	TypeSharedPointer Analyzer::resolveType( const ast::nodes::TypeNodeSharedPointer& typeNode ) {
 		if( typeNode == nullptr ) {
 			return nullptr;
@@ -5495,7 +5644,7 @@ namespace uranite::semantic {
 				if( resolvedType == nullptr && simpleTypeNode.name == qualname::identifier::SelfType && this->currentScope->isInsideClass() ) {
 					return this->currentScope->classType;
 				}
-				if( resolvedType == nullptr && simpleTypeNode.name.size() == 1 && simpleTypeNode.name[0] >= 'A' && simpleTypeNode.name[0] <= 'Z' ) {
+				if( resolvedType == nullptr && ( this->currentGenericParameterNames.count( simpleTypeNode.name ) > 0 || this->isKnownGenericParameterName( simpleTypeNode.name ) ) && simpleTypeNode.name.size() == 1 && simpleTypeNode.name[0] >= 'A' && simpleTypeNode.name[0] <= 'Z' ) {
 					GenericParameterTypeSharedPointer genericType = std::make_shared<GenericParameterType>( simpleTypeNode.name );
 					this->typeRegistry.registerType( simpleTypeNode.name, genericType );
 					resolvedType = genericType;
@@ -5515,6 +5664,12 @@ namespace uranite::semantic {
 			}
 			case ast::Node::Kind::GenericType: {
 				ast::nodes::GenericTypeNode& genericTypeNode = static_cast<ast::nodes::GenericTypeNode&>( *typeNode );
+				if( this->completionPosition != nullptr && genericTypeNode.source != nullptr && this->completionPosition->location != nullptr ) {
+					if( this->completionPosition->location->line == genericTypeNode.source->location->line &&
+						this->completionPosition->location->column >= genericTypeNode.source->location->column ) {
+						this->collectScopeCompletions( "", genericTypeNode.source );
+					}
+				}
 				if( genericTypeNode.name == qualname::classes::generator::Name && genericTypeNode.typeArguments.size() == 1 ) {
 					TypeSharedPointer innerType = this->resolveType( genericTypeNode.typeArguments[0] );
 					return innerType ? this->typeRegistry.makeGenerator( innerType ) : this->typeRegistry.getError();

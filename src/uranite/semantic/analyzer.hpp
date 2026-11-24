@@ -457,6 +457,12 @@ namespace uranite::semantic {
 			/** @brief The current package name during analysis. */
 			std::string currentPackageName;
 			
+			/** @brief Set of generic parameter names valid in the current declaration context. */
+			std::unordered_set<std::string> currentGenericParameterNames;
+			
+			/** @brief Checks if a name is a known generic parameter of any registered type or function. */
+			bool isKnownGenericParameterName( const std::string& name ) const;
+			
 			/** @brief The registry containing all known primitive and user-defined types. */
 			Registry typeRegistry;
 			
