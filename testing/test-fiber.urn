@@ -1,0 +1,25 @@
+package testing
+
+from uranite.io.console import putsln
+from uranite.testing.assertions import assertEqualI64, assertTrue, assertFalse
+from uranite.fiber.fiber import Fiber, fiberSuspend
+
+public function fiberEntry() -> I64:
+    I64 value = fiberSuspend( 42 )
+    return value + 1
+
+public function main() -> I32:
+    putsln( "Fiber Tests" )
+    Fiber fiber = new Fiber( fiberEntry )
+    assertFalse( fiber.isStarted(), "not started yet" )
+    I64 result = fiber.start( 0 )
+    assertEqualI64( 42, result, "first suspend value" )
+    assertTrue( fiber.isSuspended(), "suspended after first suspend" )
+    I64 resumed = fiber.resume( 7 )
+    assertEqualI64( 8, resumed, "resumed return value" )
+    assertTrue( fiber.isTerminated(), "terminated after return" )
+    I64 returnValue = fiber.getReturn()
+    assertEqualI64( 8, returnValue, "getReturn" )
+    fiber.destroy()
+    putsln( "All fiber tests passed" )
+    return 0

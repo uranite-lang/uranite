@@ -1619,22 +1619,32 @@ namespace uranite::ast {
 			/** @brief The identifier name of the member being accessed. */
 			std::string member;
 			
+			/** @brief Source location of the member identifier token. */
+			lookup::SourceSharedPointer memberSource;
+			
 			/** @brief The object owning the accessed member. */
 			ExpressionSharedPointer object;
+			
+			/** @brief Resolved symbol of the accessed member, if any. */
+			semantic::SymbolSharedPointer resolvedMemberSymbol;
 			
 			/**
 			 * @brief Constructs a MemberAccessExpression.
 			 * @param object The instance being accessed.
 			 * @param member The name of the field or member.
 			 * @param source The source code location information.
+			 * @param memberSource The source location of the member identifier.
 			 */
 			MemberAccessExpression(
 				ExpressionSharedPointer object,
 				const std::string& member,
-				const lookup::SourceSharedPointer& source
+				const lookup::SourceSharedPointer& source,
+				const lookup::SourceSharedPointer& memberSource = nullptr
 			) : Expression( Node::Kind::MemberAccessExpression, source ),
 				member( member ),
-				object( std::move( object ) ) {
+				memberSource( memberSource ? memberSource : source ),
+				object( std::move( object ) ),
+				resolvedMemberSymbol( nullptr ) {
 			}
 			
 		};
@@ -1653,8 +1663,14 @@ namespace uranite::ast {
 			/** @brief The name of the method to be invoked. */
 			std::string method;
 			
+			/** @brief Source location of the method identifier token. */
+			lookup::SourceSharedPointer memberSource;
+			
 			/** @brief The object instance on which the method is called. */
 			ExpressionSharedPointer object;
+			
+			/** @brief Resolved symbol of the invoked method, if any. */
+			semantic::SymbolSharedPointer resolvedMemberSymbol;
 			
 			/** @brief The generic type arguments provided for the method call. */
 			std::vector<TypeNodeSharedPointer> typeArguments;
@@ -1665,16 +1681,20 @@ namespace uranite::ast {
 			 * @param method The method identifier.
 			 * @param arguments The list of call arguments.
 			 * @param source The source code location information.
+			 * @param memberSource The source location of the method identifier.
 			 */
 			MethodCallExpression(
 				ExpressionSharedPointer object,
 				const std::string& method,
 				std::vector<ExpressionSharedPointer> arguments,
-				const lookup::SourceSharedPointer& source
+				const lookup::SourceSharedPointer& source,
+				const lookup::SourceSharedPointer& memberSource = nullptr
 			) : Expression( Node::Kind::MethodCallExpression, source ),
 				arguments( std::move( arguments ) ),
 				method( method ),
-				object( std::move( object ) ) {
+				memberSource( memberSource ? memberSource : source ),
+				object( std::move( object ) ),
+				resolvedMemberSymbol( nullptr ) {
 			}
 			
 		};
@@ -2513,6 +2533,9 @@ namespace uranite::ast {
 			/** @brief The identifier name of the variable. */
 			std::string name;
 			
+			/** @brief Source location of the declared variable identifier. */
+			lookup::SourceSharedPointer nameSource;
+			
 			/** @brief Ownership data populated by borrow checker for codegen auto-free. */
 			std::optional<OwnershipAnnotation> ownershipAnnotation;
 			
@@ -2527,6 +2550,7 @@ namespace uranite::ast {
 			 * @param mutable_ Mutability flag.
 			 * @param constant Constancy flag.
 			 * @param source Source mapping information.
+			 * @param nameSource Source location of the variable identifier.
 			 */
 			VariableStatement(
 				const std::string& name,
@@ -2534,12 +2558,14 @@ namespace uranite::ast {
 				ExpressionSharedPointer initializer,
 				bool mutable_,
 				bool constant,
-				const lookup::SourceSharedPointer& source
+				const lookup::SourceSharedPointer& source,
+				const lookup::SourceSharedPointer& nameSource = nullptr
 			) : Statement( Node::Kind::VariableStatement, source ),
 				initializer( std::move( initializer ) ),
 				isConstant( constant ),
 				isMutable( mutable_ ),
 				name( name ),
+				nameSource( nameSource ? nameSource : source ),
 				type( std::move( type ) ) {
 			}
 			
