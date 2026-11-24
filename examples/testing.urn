@@ -40,20 +40,5 @@ from uranite.testing import {
     assertTrue,
 }
 
-private function generator( Int start, Int end ) -> Generator<Int>:
-	for Int i in start..end:
-		yield i
-
-private async function printer( Iterable<Int> items ) -> Future<Void>:
-	for Int i, Int n in enumerate<Int>( items, 1 ):
-		puts( "Item: {} at index {}".format( n, i ) )
-
 public function main() -> Void:
-	try:
-		ArrayList<Int> items = []
-		Generator<Int> gen = generator( 1, 10 )
-		for Int i in generator( 1, 10 ):
-			items.append( i )
-		printer( items )
-	except Error as e:
-		putserr( e.toString() )
+	puts( "Hello World!" )
